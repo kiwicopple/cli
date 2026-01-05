@@ -21,81 +21,154 @@ schema_paths = ["./schemas/*.sql"]  # Already supports glob patterns
 
 ## Proposed Directory Structure
 
-Mirror PostgreSQL's logical organization with clean, descriptive names:
+Separate cluster-wide objects from schema-scoped objects:
 
 ```
 supabase/
+├── roles/
+│   ├── app_admin.sql              # One file per role
+│   ├── app_readonly.sql
+│   └── app_user.sql
+│
+├── cluster/
+│   ├── extensions.sql             # CREATE EXTENSION statements
+│   ├── foreign_data_wrappers.sql  # FDWs and foreign servers
+│   ├── publications.sql           # Logical replication publications
+│   ├── subscriptions.sql          # Logical replication subscriptions
+│   └── event_triggers.sql         # Database-level event triggers
+│
 ├── schemas/
-│   ├── extensions.sql          # Extensions (cluster-wide)
-│   ├── roles.sql               # Custom roles and grants
-│   │
-│   ├── public/                 # One directory per schema
-│   │   ├── types.sql           # Composite types, enums, domains
-│   │   ├── sequences.sql       # Sequences
+│   ├── public/                    # One directory per schema
+│   │   ├── schema.sql             # CREATE SCHEMA + schema-level grants
+│   │   ├── types.sql              # Composite types, enums, domains
+│   │   ├── sequences.sql          # Sequences
 │   │   ├── tables/
-│   │   │   ├── users.sql       # Each table in its own file
+│   │   │   ├── users.sql          # Table + indexes + constraints + grants + comments
 │   │   │   └── posts.sql
 │   │   ├── views/
 │   │   │   └── user_posts.sql
+│   │   ├── materialized_views/
+│   │   │   └── user_stats.sql
 │   │   ├── functions/
 │   │   │   └── get_user.sql
+│   │   ├── procedures/
+│   │   │   └── process_order.sql
 │   │   ├── triggers/
 │   │   │   └── update_timestamp.sql
-│   │   └── policies/
-│   │       └── users_rls.sql
+│   │   ├── policies/
+│   │   │   └── users.sql          # All RLS policies for a table
+│   │   └── foreign_tables/
+│   │       └── external_users.sql
 │   │
-│   └── private/                # Additional schemas
-│       └── ... (same structure)
+│   ├── private/                   # Additional schemas
+│   │   └── ... (same structure)
+│   │
+│   └── api/                       # API schema example
+│       └── ...
 │
-├── migrations/                 # Existing migrations
+├── migrations/                    # Existing migrations
 └── config.toml
 ```
 
+### Complete Object Categories
+
+#### Cluster-Wide Objects (outside `schemas/`)
+
+| Directory | File(s) | PostgreSQL Objects |
+|-----------|---------|-------------------|
+| `roles/` | `{role_name}.sql` | `CREATE ROLE`, `ALTER ROLE`, `GRANT role TO role` |
+| `cluster/` | `extensions.sql` | `CREATE EXTENSION` |
+| `cluster/` | `foreign_data_wrappers.sql` | `CREATE FOREIGN DATA WRAPPER`, `CREATE SERVER`, `CREATE USER MAPPING` |
+| `cluster/` | `publications.sql` | `CREATE PUBLICATION` |
+| `cluster/` | `subscriptions.sql` | `CREATE SUBSCRIPTION` |
+| `cluster/` | `event_triggers.sql` | `CREATE EVENT TRIGGER` |
+
+#### Schema-Scoped Objects (inside `schemas/{schema}/`)
+
+| Directory | File(s) | PostgreSQL Objects |
+|-----------|---------|-------------------|
+| `schemas/{schema}/` | `schema.sql` | `CREATE SCHEMA`, schema-level `GRANT` |
+| `schemas/{schema}/` | `types.sql` | `CREATE TYPE` (enum, composite, range), `CREATE DOMAIN` |
+| `schemas/{schema}/` | `sequences.sql` | `CREATE SEQUENCE` |
+| `schemas/{schema}/tables/` | `{table}.sql` | `CREATE TABLE`, `ALTER TABLE` (constraints), `CREATE INDEX`, table `GRANT`, `COMMENT` |
+| `schemas/{schema}/views/` | `{view}.sql` | `CREATE VIEW`, view `GRANT`, `COMMENT` |
+| `schemas/{schema}/materialized_views/` | `{mview}.sql` | `CREATE MATERIALIZED VIEW`, indexes, `GRANT`, `COMMENT` |
+| `schemas/{schema}/functions/` | `{function}.sql` | `CREATE FUNCTION` (all overloads), `GRANT`, `COMMENT` |
+| `schemas/{schema}/procedures/` | `{procedure}.sql` | `CREATE PROCEDURE`, `GRANT`, `COMMENT` |
+| `schemas/{schema}/triggers/` | `{trigger}.sql` | `CREATE TRIGGER` |
+| `schemas/{schema}/policies/` | `{table}.sql` | `CREATE POLICY` (all policies for a table) |
+| `schemas/{schema}/foreign_tables/` | `{ftable}.sql` | `CREATE FOREIGN TABLE`, `GRANT` |
+
 ### Managing Dependencies via Config
 
-As documented in the Supabase docs, schema files are run in lexicographic order by default. For projects with dependencies between objects, the `schema_paths` config provides explicit ordering control. Any glob patterns are evaluated, deduplicated, and sorted lexicographically.
+Schema files are run in lexicographic order by default. For projects with dependencies, the `schema_paths` config provides explicit ordering control.
 
-**Example: Simple project (default ordering is sufficient)**
-```toml
-[db.migrations]
-schema_paths = ["./schemas/**/*.sql"]
-```
-
-**Example: Project with dependencies**
+**Example: Simple project (default ordering)**
 ```toml
 [db.migrations]
 schema_paths = [
-  # Cluster-level objects first
-  "./schemas/extensions.sql",
-  "./schemas/roles.sql",
+  "./roles/*.sql",
+  "./cluster/*.sql",
+  "./schemas/**/*.sql",
+]
+```
 
-  # Types and sequences before tables (tables may reference them)
+**Example: Project with full dependency ordering**
+```toml
+[db.migrations]
+schema_paths = [
+  # 1. Cluster-level objects
+  "./roles/*.sql",
+  "./cluster/extensions.sql",
+  "./cluster/foreign_data_wrappers.sql",
+
+  # 2. Schema definitions
+  "./schemas/*/schema.sql",
+
+  # 3. Types and sequences (before tables)
   "./schemas/*/types.sql",
   "./schemas/*/sequences.sql",
 
-  # Tables before views/functions (views query tables)
+  # 4. Tables (with indexes, constraints)
   "./schemas/*/tables/*.sql",
 
-  # Views and functions
-  "./schemas/*/views/*.sql",
-  "./schemas/*/functions/*.sql",
+  # 5. Foreign tables
+  "./schemas/*/foreign_tables/*.sql",
 
-  # Triggers reference tables and functions
+  # 6. Views and materialized views (depend on tables)
+  "./schemas/*/views/*.sql",
+  "./schemas/*/materialized_views/*.sql",
+
+  # 7. Functions and procedures
+  "./schemas/*/functions/*.sql",
+  "./schemas/*/procedures/*.sql",
+
+  # 8. Triggers (depend on tables and functions)
   "./schemas/*/triggers/*.sql",
 
-  # Policies last (reference tables)
+  # 9. RLS policies (depend on tables)
   "./schemas/*/policies/*.sql",
+
+  # 10. Replication (depends on tables)
+  "./cluster/publications.sql",
+  "./cluster/subscriptions.sql",
+
+  # 11. Event triggers (last)
+  "./cluster/event_triggers.sql",
 ]
 ```
 
 **Example: Specific table ordering for foreign keys**
-
-When `managers` references `employees`:
 ```toml
 [db.migrations]
 schema_paths = [
-  "./schemas/extensions.sql",
+  "./roles/*.sql",
+  "./cluster/*.sql",
+  "./schemas/*/schema.sql",
+  "./schemas/*/types.sql",
+  "./schemas/*/sequences.sql",
   "./schemas/public/tables/employees.sql",  # Parent table first
+  "./schemas/public/tables/departments.sql",
   "./schemas/public/tables/*.sql",          # Remaining tables (deduped)
   "./schemas/**/*.sql",                     # Everything else
 ]
@@ -103,11 +176,12 @@ schema_paths = [
 
 ### Rationale for Structure
 
-1. **No numeric prefixes** - Ordering is handled by `schema_paths` config, not filename conventions
-2. **Clean, descriptive names** - Easier to read and navigate
-3. **Schema-first hierarchy** - Groups all objects for a schema together
-4. **Separate files per object** - Easier to review changes, better git history
-5. **Aggregated small objects** - Types, sequences grouped per schema (less file clutter)
+1. **Cluster vs Schema separation** - Reflects PostgreSQL's actual hierarchy
+2. **No numeric prefixes** - Ordering handled via `schema_paths` config
+3. **Clean, descriptive names** - Easier to read and navigate
+4. **One role per file** - Easier to manage permissions per role
+5. **Grouped small objects** - Types, sequences in single files per schema
+6. **Related statements together** - Table file includes its indexes, constraints, grants
 
 ## Implementation Plan
 
@@ -121,27 +195,40 @@ Create a statement classifier that parses pg_dump output and categorizes each st
 type StatementType string
 
 const (
-    TypeExtension  StatementType = "extension"
-    TypeRole       StatementType = "role"
-    TypeSchema     StatementType = "schema"
-    TypeType       StatementType = "type"      // ENUM, COMPOSITE, DOMAIN
-    TypeSequence   StatementType = "sequence"
-    TypeTable      StatementType = "table"
-    TypeView       StatementType = "view"
-    TypeFunction   StatementType = "function"
-    TypeTrigger    StatementType = "trigger"
-    TypePolicy     StatementType = "policy"
-    TypeIndex      StatementType = "index"
-    TypeConstraint StatementType = "constraint"
-    TypeGrant      StatementType = "grant"
-    TypeComment    StatementType = "comment"
-    TypeOther      StatementType = "other"
+    // Cluster-level
+    TypeRole               StatementType = "role"
+    TypeExtension          StatementType = "extension"
+    TypeForeignDataWrapper StatementType = "foreign_data_wrapper"
+    TypeForeignServer      StatementType = "foreign_server"
+    TypeUserMapping        StatementType = "user_mapping"
+    TypePublication        StatementType = "publication"
+    TypeSubscription       StatementType = "subscription"
+    TypeEventTrigger       StatementType = "event_trigger"
+
+    // Schema-level
+    TypeSchema           StatementType = "schema"
+    TypeType             StatementType = "type"      // ENUM, COMPOSITE, RANGE, DOMAIN
+    TypeSequence         StatementType = "sequence"
+    TypeTable            StatementType = "table"
+    TypeForeignTable     StatementType = "foreign_table"
+    TypeView             StatementType = "view"
+    TypeMaterializedView StatementType = "materialized_view"
+    TypeFunction         StatementType = "function"
+    TypeProcedure        StatementType = "procedure"
+    TypeTrigger          StatementType = "trigger"
+    TypePolicy           StatementType = "policy"
+    TypeIndex            StatementType = "index"
+    TypeConstraint       StatementType = "constraint"
+    TypeGrant            StatementType = "grant"
+    TypeComment          StatementType = "comment"
+    TypeOther            StatementType = "other"
 )
 
 type ClassifiedStatement struct {
     Type       StatementType
-    Schema     string    // e.g., "public"
+    Schema     string    // e.g., "public" (empty for cluster-level)
     ObjectName string    // e.g., "users"
+    ParentName string    // e.g., table name for index/trigger/policy
     Statement  string    // Full SQL statement
 }
 
@@ -149,20 +236,32 @@ func ClassifyStatement(sql string) ClassifiedStatement
 ```
 
 **Classification patterns:**
-- `CREATE EXTENSION` → extension
-- `CREATE ROLE` / `ALTER ROLE` / `GRANT ... TO` → role
-- `CREATE SCHEMA` → schema
-- `CREATE TYPE` / `CREATE DOMAIN` → type
-- `CREATE SEQUENCE` → sequence
-- `CREATE TABLE` (not `CREATE TABLE ... AS`) → table
-- `CREATE VIEW` / `CREATE MATERIALIZED VIEW` → view
-- `CREATE FUNCTION` / `CREATE PROCEDURE` → function
-- `CREATE TRIGGER` → trigger
-- `CREATE POLICY` → policy
-- `CREATE INDEX` → index (stored with parent table)
-- `ALTER TABLE ... ADD CONSTRAINT` → constraint (stored with parent table)
-- `GRANT` / `REVOKE` → grant (stored with related object)
-- `COMMENT ON` → comment (stored with related object)
+
+| Pattern | Type |
+|---------|------|
+| `CREATE ROLE` / `ALTER ROLE` / `GRANT ... TO` | role |
+| `CREATE EXTENSION` | extension |
+| `CREATE FOREIGN DATA WRAPPER` | foreign_data_wrapper |
+| `CREATE SERVER` | foreign_server |
+| `CREATE USER MAPPING` | user_mapping |
+| `CREATE PUBLICATION` | publication |
+| `CREATE SUBSCRIPTION` | subscription |
+| `CREATE EVENT TRIGGER` | event_trigger |
+| `CREATE SCHEMA` | schema |
+| `CREATE TYPE` / `CREATE DOMAIN` | type |
+| `CREATE SEQUENCE` | sequence |
+| `CREATE TABLE` (not AS SELECT) | table |
+| `CREATE FOREIGN TABLE` | foreign_table |
+| `CREATE VIEW` | view |
+| `CREATE MATERIALIZED VIEW` | materialized_view |
+| `CREATE FUNCTION` | function |
+| `CREATE PROCEDURE` | procedure |
+| `CREATE TRIGGER` | trigger |
+| `CREATE POLICY` | policy |
+| `CREATE INDEX` | index |
+| `ALTER TABLE ... ADD CONSTRAINT` | constraint |
+| `GRANT` / `REVOKE` on object | grant |
+| `COMMENT ON` | comment |
 
 ### Phase 2: Statement Grouper
 
@@ -172,21 +271,22 @@ Group related statements together:
 
 ```go
 type ObjectFile struct {
-    Schema     string
+    Category   string           // "cluster", "roles", or "schemas"
+    Schema     string           // Empty for cluster-level
     Type       StatementType
     Name       string
-    Statements []string  // Ordered: CREATE, ALTER, GRANT, COMMENT, INDEX, etc.
+    Statements []string         // Ordered statements
 }
 
 func GroupStatements(statements []ClassifiedStatement) map[string]*ObjectFile
 ```
 
-For example, a table file would contain:
-1. `CREATE TABLE`
-2. `ALTER TABLE ... ADD CONSTRAINT` (for the same table)
-3. `CREATE INDEX ON table` (indexes on the table)
-4. `GRANT ... ON table` (permissions)
-5. `COMMENT ON TABLE` / `COMMENT ON COLUMN` (comments)
+**Grouping rules:**
+- Table file: `CREATE TABLE` + `ALTER TABLE ADD CONSTRAINT` + `CREATE INDEX ON` + `GRANT ON TABLE` + `COMMENT ON TABLE/COLUMN`
+- View file: `CREATE VIEW` + `GRANT ON VIEW` + `COMMENT ON VIEW`
+- Function file: All overloads of same function + `GRANT ON FUNCTION` + `COMMENT`
+- Role file: `CREATE ROLE` + `ALTER ROLE` + `GRANT role TO`
+- Policy file: All `CREATE POLICY` for same table (grouped by table name)
 
 ### Phase 3: Directory Writer
 
@@ -195,26 +295,39 @@ For example, a table file would contain:
 Write grouped statements to the directory structure:
 
 ```go
-type DumpConfig struct {
-    OutputDir     string           // Default: "supabase/schemas"
-    Schemas       []string         // Filter to specific schemas
+type StructuredDumpConfig struct {
+    BaseDir       string           // Default: "supabase"
+    Schemas       []string         // Filter to specific schemas (empty = all)
     IncludeRoles  bool             // Include roles dump
-    IncludeGrants bool             // Include GRANT statements
+    IncludeGrants bool             // Include GRANT statements with objects
 }
 
-func WriteStructuredDump(ctx context.Context, config DumpConfig, objects map[string]*ObjectFile, fsys afero.Fs) error
+func WriteStructuredDump(ctx context.Context, config StructuredDumpConfig, objects map[string]*ObjectFile, fsys afero.Fs) error
 ```
 
-File naming conventions:
-- Extensions: `extensions.sql` (all in one file)
-- Roles: `roles.sql` (all in one file)
-- Types: `{schema}/types.sql` (all types per schema in one file)
-- Sequences: `{schema}/sequences.sql` (all sequences per schema)
-- Tables: `{schema}/tables/{table_name}.sql`
-- Views: `{schema}/views/{view_name}.sql`
-- Functions: `{schema}/functions/{function_name}.sql` (overloads in same file)
-- Triggers: `{schema}/triggers/{trigger_name}.sql`
-- Policies: `{schema}/policies/{table_name}.sql` (all policies for a table together)
+**File paths:**
+
+| Object Type | Path |
+|-------------|------|
+| Role | `roles/{role_name}.sql` |
+| Extension | `cluster/extensions.sql` |
+| FDW | `cluster/foreign_data_wrappers.sql` |
+| Foreign Server | `cluster/foreign_data_wrappers.sql` |
+| User Mapping | `cluster/foreign_data_wrappers.sql` |
+| Publication | `cluster/publications.sql` |
+| Subscription | `cluster/subscriptions.sql` |
+| Event Trigger | `cluster/event_triggers.sql` |
+| Schema | `schemas/{schema}/schema.sql` |
+| Type/Domain | `schemas/{schema}/types.sql` |
+| Sequence | `schemas/{schema}/sequences.sql` |
+| Table | `schemas/{schema}/tables/{table}.sql` |
+| Foreign Table | `schemas/{schema}/foreign_tables/{table}.sql` |
+| View | `schemas/{schema}/views/{view}.sql` |
+| Materialized View | `schemas/{schema}/materialized_views/{mview}.sql` |
+| Function | `schemas/{schema}/functions/{function}.sql` |
+| Procedure | `schemas/{schema}/procedures/{procedure}.sql` |
+| Trigger | `schemas/{schema}/triggers/{trigger}.sql` |
+| Policy | `schemas/{schema}/policies/{table}.sql` |
 
 ### Phase 4: Command Integration
 
@@ -223,32 +336,32 @@ File naming conventions:
 Add new flag to `db dump`:
 
 ```
-supabase db dump --local --structured [--output-dir ./schemas]
+supabase db dump --local --structured [--output-dir .]
 ```
 
 **New flags:**
 - `--structured` / `-S`: Enable structured directory output
-- `--output-dir`: Output directory (default: `supabase/schemas`)
+- `--output-dir`: Base output directory (default: current supabase dir)
 
 ### Phase 5: Config Generator
 
 **File:** `internal/db/dump/config.go`
 
-Generate recommended `schema_paths` config based on dumped structure:
+Generate recommended `schema_paths` config:
 
 ```go
-func GenerateSchemaPathsConfig(outputDir string, fsys afero.Fs) ([]string, error)
+func GenerateSchemaPathsConfig(baseDir string, fsys afero.Fs) ([]string, error)
 ```
 
-This scans the generated directory structure and produces recommended glob patterns with proper ordering for dependencies.
+Scans directory structure and produces ordered glob patterns.
 
 ## Detailed Implementation Steps
 
 ### Step 1: Statement Classification (2 files)
 
 1. Create `pkg/migration/classify.go`:
-   - Regex-based classifier for PostgreSQL DDL statements
-   - Extract schema and object names from statements
+   - Regex-based classifier for all PostgreSQL DDL statements
+   - Extract schema, object name, and parent references
    - Handle quoted identifiers
 
 2. Create `pkg/migration/classify_test.go`:
@@ -258,43 +371,48 @@ This scans the generated directory structure and produces recommended glob patte
 ### Step 2: Statement Grouping (2 files)
 
 1. Create `pkg/migration/group.go`:
-   - Group statements by schema + object type + object name
-   - Order statements within groups correctly
-   - Handle cross-references (indexes, constraints, grants)
+   - Group statements by category + schema + type + name
+   - Order statements within groups
+   - Handle parent references (indexes → table, triggers → table)
 
 2. Create `pkg/migration/group_test.go`:
    - Test grouping logic
-   - Test statement ordering within groups
+   - Test parent association
 
 ### Step 3: Directory Writer (2 files)
 
 1. Create `pkg/migration/writer.go`:
    - Create directory structure
-   - Write files with proper headers/separators
-   - Handle file naming (sanitize names, handle collisions)
-   - Make statements idempotent (IF NOT EXISTS, OR REPLACE)
+   - Write files with proper formatting
+   - Handle file naming (sanitize, collisions)
+   - Make statements idempotent where possible
 
 2. Create `pkg/migration/writer_test.go`:
    - Test file generation
-   - Test directory structure creation
+   - Test directory structure
 
 ### Step 4: Command Changes (2 files)
 
 1. Modify `cmd/db.go`:
-   - Add `--structured` and `--output-dir` flags to `db dump`
+   - Add `--structured` and `--output-dir` flags
 
 2. Modify `internal/db/dump/dump.go`:
    - Add `RunStructured()` function
-   - Integrate with existing dump pipeline
+   - Integrate with existing pipeline
 
 ### Step 5: Config Helper (2 files)
 
 1. Create `internal/db/dump/config.go`:
    - Scan output directory
-   - Generate schema_paths config with dependency ordering
+   - Generate schema_paths config
 
-2. Add to dump output:
-   - Print suggested config after structured dump
+2. Print suggested config after dump
+
+### Step 6: Update Config Loading
+
+1. Modify `pkg/config/config.go`:
+   - Update path resolution to handle `roles/` and `cluster/` directories
+   - Ensure relative paths work from supabase directory
 
 ## Example Output
 
@@ -302,10 +420,15 @@ After running `supabase db dump --structured`:
 
 ```
 supabase/
+├── roles/
+│   ├── app_admin.sql
+│   └── app_user.sql
+├── cluster/
+│   ├── extensions.sql
+│   └── foreign_data_wrappers.sql
 └── schemas/
-    ├── extensions.sql
-    ├── roles.sql
     └── public/
+        ├── schema.sql
         ├── types.sql
         ├── sequences.sql
         ├── tables/
@@ -315,36 +438,68 @@ supabase/
         │   └── profiles.sql
         ├── functions/
         │   └── get_age.sql
-        ├── triggers/
-        │   └── update_timestamp.sql
         └── policies/
             └── employees.sql
 ```
 
-**Generated employees.sql:**
+**Generated `roles/app_user.sql`:**
 ```sql
-create table "employees" (
-  "id" integer not null,
+CREATE ROLE "app_user" WITH NOLOGIN;
+
+GRANT USAGE ON SCHEMA "public" TO "app_user";
+GRANT SELECT ON ALL TABLES IN SCHEMA "public" TO "app_user";
+```
+
+**Generated `cluster/extensions.sql`:**
+```sql
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+```
+
+**Generated `cluster/foreign_data_wrappers.sql`:**
+```sql
+CREATE FOREIGN DATA WRAPPER "postgres_fdw"
+  HANDLER postgres_fdw_handler
+  VALIDATOR postgres_fdw_validator;
+
+CREATE SERVER "external_db"
+  FOREIGN DATA WRAPPER "postgres_fdw"
+  OPTIONS (host 'db.example.com', dbname 'external');
+
+CREATE USER MAPPING FOR "postgres"
+  SERVER "external_db"
+  OPTIONS (user 'remote_user');
+```
+
+**Generated `schemas/public/schema.sql`:**
+```sql
+CREATE SCHEMA IF NOT EXISTS "public";
+
+GRANT USAGE ON SCHEMA "public" TO "app_user";
+GRANT ALL ON SCHEMA "public" TO "app_admin";
+```
+
+**Generated `schemas/public/tables/employees.sql`:**
+```sql
+CREATE TABLE IF NOT EXISTS "public"."employees" (
+  "id" integer NOT NULL,
   "name" text,
-  "age" smallint not null
+  "department_id" integer,
+  "age" smallint NOT NULL,
+  CONSTRAINT "employees_pkey" PRIMARY KEY ("id")
 );
-```
 
-**Generated profiles.sql (view):**
-```sql
-create view "profiles" as
-  select id, name from "employees";
-```
+ALTER TABLE "public"."employees"
+  ADD CONSTRAINT "employees_department_fkey"
+  FOREIGN KEY ("department_id") REFERENCES "public"."departments"("id");
 
-**Generated get_age.sql (function):**
-```sql
-create function "get_age"(employee_id integer) RETURNS smallint
-  LANGUAGE "sql"
-AS $$
-  select age
-  from employees
-  where id = employee_id;
-$$;
+CREATE INDEX "employees_name_idx" ON "public"."employees" ("name");
+
+GRANT SELECT ON "public"."employees" TO "app_user";
+GRANT ALL ON "public"."employees" TO "app_admin";
+
+COMMENT ON TABLE "public"."employees" IS 'Company employees';
+COMMENT ON COLUMN "public"."employees"."age" IS 'Employee age in years';
 ```
 
 **Suggested config output:**
@@ -353,15 +508,23 @@ Structured dump complete. Add to config.toml:
 
 [db.migrations]
 schema_paths = [
-  "./schemas/extensions.sql",
-  "./schemas/roles.sql",
+  "./roles/*.sql",
+  "./cluster/extensions.sql",
+  "./cluster/foreign_data_wrappers.sql",
+  "./schemas/*/schema.sql",
   "./schemas/*/types.sql",
   "./schemas/*/sequences.sql",
   "./schemas/*/tables/*.sql",
+  "./schemas/*/foreign_tables/*.sql",
   "./schemas/*/views/*.sql",
+  "./schemas/*/materialized_views/*.sql",
   "./schemas/*/functions/*.sql",
+  "./schemas/*/procedures/*.sql",
   "./schemas/*/triggers/*.sql",
   "./schemas/*/policies/*.sql",
+  "./cluster/publications.sql",
+  "./cluster/subscriptions.sql",
+  "./cluster/event_triggers.sql",
 ]
 ```
 
@@ -380,48 +543,22 @@ schema_paths = [
    - Circular dependencies (handled by idempotent SQL)
    - Special characters in names
    - Very large schemas
-   - Empty schemas
+   - Empty directories (not created)
+   - Overloaded functions
+   - Multiple policies per table
 
 ## Alternative Considerations
 
-### Alternative 1: Flat Structure
-```
-schemas/
-├── extensions.sql
-├── roles.sql
-├── public.types.sql
-├── public.tables.users.sql
-├── public.functions.get_user.sql
-```
-**Rejected:** Less intuitive navigation, harder to browse
+### Alternative 1: Extensions in schemas/
+**Rejected:** Extensions are cluster-wide, not schema-scoped (even though they may create objects in a schema)
 
-### Alternative 2: By Object Type First
-```
-schemas/
-├── extensions/
-├── tables/
-│   ├── public.users.sql
-│   └── private.secrets.sql
-├── functions/
-```
-**Rejected:** Harder to see all objects in a schema together
+### Alternative 2: Single roles.sql file
+**Rejected:** Individual role files are easier to manage, review, and selectively apply
 
-### Alternative 3: Single Files per Schema
-```
-schemas/
-├── public.sql
-├── private.sql
-```
-**Rejected:** Large files, harder to diff and review
+### Alternative 3: Triggers with their tables
+**Rejected:** Triggers often reference functions; keeping them separate allows proper ordering
 
-### Alternative 4: Numeric Prefixes
-```
-schemas/
-├── 00_extensions.sql
-├── 01_roles.sql
-├── public/
-│   ├── 00_types.sql
-```
+### Alternative 4: Numeric prefixes for ordering
 **Rejected:** Ordering should be controlled via config, not filename conventions
 
 ## Migration Path
@@ -429,11 +566,28 @@ schemas/
 For existing users:
 
 1. Run `supabase db dump --structured`
-2. Review generated files in `supabase/schemas/`
+2. Review generated files in `supabase/`
 3. Add `schema_paths` config from generated suggestion
-4. Customize ordering if you have specific dependencies
+4. Customize ordering if needed for specific dependencies
 5. Test with `supabase db diff` to verify parity
 6. Commit to version control
+
+## Code Changes Required
+
+### Files to Create
+- `pkg/migration/classify.go`
+- `pkg/migration/classify_test.go`
+- `pkg/migration/group.go`
+- `pkg/migration/group_test.go`
+- `pkg/migration/writer.go`
+- `pkg/migration/writer_test.go`
+- `internal/db/dump/config.go`
+
+### Files to Modify
+- `cmd/db.go` - Add flags
+- `internal/db/dump/dump.go` - Add structured dump function
+- `pkg/config/config.go` - Support new directory paths
+- `internal/utils/misc.go` - Add path constants for new directories
 
 ## Dependencies
 
@@ -444,7 +598,8 @@ For existing users:
 ## Success Criteria
 
 1. `db dump --structured` produces correct directory structure
-2. Files load correctly via `schema_paths` config
-3. `db diff` shows no changes after dump → apply cycle
-4. Generated config patterns work with existing glob system
-5. Documentation updated with examples
+2. Cluster-wide objects are outside `schemas/` directory
+3. Files load correctly via `schema_paths` config
+4. `db diff` shows no changes after dump → apply cycle
+5. Generated config patterns work with existing glob system
+6. Documentation updated with examples
