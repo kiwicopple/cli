@@ -25,12 +25,8 @@ Separate cluster-wide objects from schema-scoped objects:
 
 ```
 supabase/
-├── roles/
-│   ├── app_admin.sql              # One file per role
-│   ├── app_readonly.sql
-│   └── app_user.sql
-│
 ├── cluster/
+│   ├── roles.sql                  # All custom roles and role grants
 │   ├── extensions.sql             # CREATE EXTENSION statements
 │   ├── foreign_data_wrappers.sql  # FDWs and foreign servers
 │   ├── publications.sql           # Logical replication publications
@@ -70,16 +66,16 @@ supabase/
 
 ### Complete Object Categories
 
-#### Cluster-Wide Objects (outside `schemas/`)
+#### Cluster-Wide Objects (`cluster/`)
 
-| Directory | File(s) | PostgreSQL Objects |
-|-----------|---------|-------------------|
-| `roles/` | `{role_name}.sql` | `CREATE ROLE`, `ALTER ROLE`, `GRANT role TO role` |
-| `cluster/` | `extensions.sql` | `CREATE EXTENSION` |
-| `cluster/` | `foreign_data_wrappers.sql` | `CREATE FOREIGN DATA WRAPPER`, `CREATE SERVER`, `CREATE USER MAPPING` |
-| `cluster/` | `publications.sql` | `CREATE PUBLICATION` |
-| `cluster/` | `subscriptions.sql` | `CREATE SUBSCRIPTION` |
-| `cluster/` | `event_triggers.sql` | `CREATE EVENT TRIGGER` |
+| File | PostgreSQL Objects |
+|------|-------------------|
+| `roles.sql` | `CREATE ROLE`, `ALTER ROLE`, `GRANT role TO role` |
+| `extensions.sql` | `CREATE EXTENSION` |
+| `foreign_data_wrappers.sql` | `CREATE FOREIGN DATA WRAPPER`, `CREATE SERVER`, `CREATE USER MAPPING` |
+| `publications.sql` | `CREATE PUBLICATION` |
+| `subscriptions.sql` | `CREATE SUBSCRIPTION` |
+| `event_triggers.sql` | `CREATE EVENT TRIGGER` |
 
 #### Schema-Scoped Objects (inside `schemas/{schema}/`)
 
@@ -104,7 +100,6 @@ Schema files are run in lexicographic order by default. For projects with depend
 ```toml
 [db.migrations]
 schema_paths = [
-  "./roles/*.sql",
   "./cluster/*.sql",
   "./schemas/**/*.sql",
 ]
@@ -115,7 +110,7 @@ schema_paths = [
 [db.migrations]
 schema_paths = [
   # 1. Cluster-level objects
-  "./roles/*.sql",
+  "./cluster/roles.sql",
   "./cluster/extensions.sql",
   "./cluster/foreign_data_wrappers.sql",
 
@@ -156,7 +151,6 @@ schema_paths = [
 ```toml
 [db.migrations]
 schema_paths = [
-  "./roles/*.sql",
   "./cluster/*.sql",
   "./schemas/*/schema.sql",
   "./schemas/*/types.sql",
@@ -173,9 +167,9 @@ schema_paths = [
 1. **Cluster vs Schema separation** - Reflects PostgreSQL's actual hierarchy
 2. **No numeric prefixes** - Ordering handled via `schema_paths` config
 3. **Clean, descriptive names** - Easier to read and navigate
-4. **One role per file** - Easier to manage permissions per role
-5. **Grouped small objects** - Types, sequences in single files per schema
-6. **Related statements together** - Table file includes its indexes, constraints, grants
+4. **All roles together** - Role grants (`GRANT role TO role`) stay with both roles, easier to see hierarchy
+5. **Grouped small objects** - Types, sequences, roles in single files (less clutter)
+6. **Related statements together** - Table file includes its indexes, constraints, policies, grants
 
 ## Implementation Plan
 
@@ -302,7 +296,7 @@ func WriteStructuredDump(ctx context.Context, config StructuredDumpConfig, objec
 
 | Object Type | Path |
 |-------------|------|
-| Role | `roles/{role_name}.sql` |
+| Role | `cluster/roles.sql` |
 | Extension | `cluster/extensions.sql` |
 | FDW | `cluster/foreign_data_wrappers.sql` |
 | Foreign Server | `cluster/foreign_data_wrappers.sql` |
@@ -412,10 +406,8 @@ After running `supabase db dump --structured`:
 
 ```
 supabase/
-├── roles/
-│   ├── app_admin.sql
-│   └── app_user.sql
 ├── cluster/
+│   ├── roles.sql
 │   ├── extensions.sql
 │   └── foreign_data_wrappers.sql
 └── schemas/
@@ -432,12 +424,15 @@ supabase/
             └── get_age.sql
 ```
 
-**Generated `roles/app_user.sql`:**
+**Generated `cluster/roles.sql`:**
 ```sql
 CREATE ROLE "app_user" WITH NOLOGIN;
+CREATE ROLE "app_admin" WITH NOLOGIN;
+
+GRANT "app_user" TO "app_admin";
 
 GRANT USAGE ON SCHEMA "public" TO "app_user";
-GRANT SELECT ON ALL TABLES IN SCHEMA "public" TO "app_user";
+GRANT ALL ON SCHEMA "public" TO "app_admin";
 ```
 
 **Generated `cluster/extensions.sql`:**
@@ -508,7 +503,7 @@ Structured dump complete. Add to config.toml:
 
 [db.migrations]
 schema_paths = [
-  "./roles/*.sql",
+  "./cluster/roles.sql",
   "./cluster/extensions.sql",
   "./cluster/foreign_data_wrappers.sql",
   "./schemas/*/schema.sql",
@@ -551,8 +546,8 @@ schema_paths = [
 ### Alternative 1: Extensions in schemas/
 **Rejected:** Extensions are cluster-wide, not schema-scoped (even though they may create objects in a schema)
 
-### Alternative 2: Single roles.sql file
-**Rejected:** Individual role files are easier to manage, review, and selectively apply
+### Alternative 2: One file per role
+**Rejected:** Role grants (`GRANT role TO role`) logically belong with both roles; single file keeps hierarchy visible
 
 ### Alternative 3: Triggers with their tables
 **Rejected:** Triggers often reference functions; keeping them separate allows proper ordering
@@ -585,8 +580,8 @@ For existing users:
 ### Files to Modify
 - `cmd/db.go` - Add flags
 - `internal/db/dump/dump.go` - Add structured dump function
-- `pkg/config/config.go` - Support new directory paths
-- `internal/utils/misc.go` - Add path constants for new directories
+- `pkg/config/config.go` - Support `cluster/` directory path
+- `internal/utils/misc.go` - Add path constant for `cluster/` directory
 
 ## Dependencies
 
