@@ -21,18 +21,17 @@ schema_paths = ["./schemas/*.sql"]  # Already supports glob patterns
 
 ## Proposed Directory Structure
 
-Mirror PostgreSQL's logical organization:
+Mirror PostgreSQL's logical organization with clean, descriptive names:
 
 ```
 supabase/
 ├── schemas/
-│   ├── 00_extensions.sql       # Extensions (cluster-wide)
-│   ├── 01_roles.sql            # Custom roles and grants
-│   ├── 02_schemas.sql          # CREATE SCHEMA statements
+│   ├── extensions.sql          # Extensions (cluster-wide)
+│   ├── roles.sql               # Custom roles and grants
 │   │
 │   ├── public/                 # One directory per schema
-│   │   ├── 00_types.sql        # Composite types, enums, domains
-│   │   ├── 01_sequences.sql    # Sequences (before tables that reference them)
+│   │   ├── types.sql           # Composite types, enums, domains
+│   │   ├── sequences.sql       # Sequences
 │   │   ├── tables/
 │   │   │   ├── users.sql       # Each table in its own file
 │   │   │   └── posts.sql
@@ -52,37 +51,63 @@ supabase/
 └── config.toml
 ```
 
-### Rationale for Structure
+### Managing Dependencies via Config
 
-1. **Numeric prefixes (00_, 01_, 02_)** - Ensures correct load order within glob patterns
-2. **Extensions first** - Required before schemas that depend on extension types
-3. **Roles before schemas** - Roles may own schemas
-4. **Types before tables** - Tables may reference custom types
-5. **Sequences before tables** - Tables may have default values referencing sequences
-6. **Tables before views/functions** - Views query tables, functions may reference tables
-7. **Triggers after tables/functions** - Triggers reference both
-8. **Policies last** - RLS policies reference tables
+As documented in the Supabase docs, schema files are run in lexicographic order by default. For projects with dependencies between objects, the `schema_paths` config provides explicit ordering control. Any glob patterns are evaluated, deduplicated, and sorted lexicographically.
 
-### Recommended Config Pattern
+**Example: Simple project (default ordering is sufficient)**
+```toml
+[db.migrations]
+schema_paths = ["./schemas/**/*.sql"]
+```
 
+**Example: Project with dependencies**
 ```toml
 [db.migrations]
 schema_paths = [
-  # Cluster-level objects
-  "./schemas/00_extensions.sql",
-  "./schemas/01_roles.sql",
-  "./schemas/02_schemas.sql",
+  # Cluster-level objects first
+  "./schemas/extensions.sql",
+  "./schemas/roles.sql",
 
-  # Schema-level objects (per schema, in order)
-  "./schemas/*/00_types.sql",
-  "./schemas/*/01_sequences.sql",
+  # Types and sequences before tables (tables may reference them)
+  "./schemas/*/types.sql",
+  "./schemas/*/sequences.sql",
+
+  # Tables before views/functions (views query tables)
   "./schemas/*/tables/*.sql",
+
+  # Views and functions
   "./schemas/*/views/*.sql",
   "./schemas/*/functions/*.sql",
+
+  # Triggers reference tables and functions
   "./schemas/*/triggers/*.sql",
+
+  # Policies last (reference tables)
   "./schemas/*/policies/*.sql",
 ]
 ```
+
+**Example: Specific table ordering for foreign keys**
+
+When `managers` references `employees`:
+```toml
+[db.migrations]
+schema_paths = [
+  "./schemas/extensions.sql",
+  "./schemas/public/tables/employees.sql",  # Parent table first
+  "./schemas/public/tables/*.sql",          # Remaining tables (deduped)
+  "./schemas/**/*.sql",                     # Everything else
+]
+```
+
+### Rationale for Structure
+
+1. **No numeric prefixes** - Ordering is handled by `schema_paths` config, not filename conventions
+2. **Clean, descriptive names** - Easier to read and navigate
+3. **Schema-first hierarchy** - Groups all objects for a schema together
+4. **Separate files per object** - Easier to review changes, better git history
+5. **Aggregated small objects** - Types, sequences grouped per schema (less file clutter)
 
 ## Implementation Plan
 
@@ -181,11 +206,10 @@ func WriteStructuredDump(ctx context.Context, config DumpConfig, objects map[str
 ```
 
 File naming conventions:
-- Extensions: `00_extensions.sql` (all in one file)
-- Roles: `01_roles.sql` (all in one file)
-- Schemas: `02_schemas.sql` (all CREATE SCHEMA in one file)
-- Types: `{schema}/00_types.sql` (all types per schema in one file)
-- Sequences: `{schema}/01_sequences.sql` (all sequences per schema)
+- Extensions: `extensions.sql` (all in one file)
+- Roles: `roles.sql` (all in one file)
+- Types: `{schema}/types.sql` (all types per schema in one file)
+- Sequences: `{schema}/sequences.sql` (all sequences per schema)
 - Tables: `{schema}/tables/{table_name}.sql`
 - Views: `{schema}/views/{view_name}.sql`
 - Functions: `{schema}/functions/{function_name}.sql` (overloads in same file)
@@ -210,13 +234,13 @@ supabase db dump --local --structured [--output-dir ./schemas]
 
 **File:** `internal/db/dump/config.go`
 
-Generate or update `schema_paths` in config.toml based on dumped structure:
+Generate recommended `schema_paths` config based on dumped structure:
 
 ```go
 func GenerateSchemaPathsConfig(outputDir string, fsys afero.Fs) ([]string, error)
 ```
 
-This scans the generated directory structure and produces the recommended glob patterns.
+This scans the generated directory structure and produces recommended glob patterns with proper ordering for dependencies.
 
 ## Detailed Implementation Steps
 
@@ -267,10 +291,79 @@ This scans the generated directory structure and produces the recommended glob p
 
 1. Create `internal/db/dump/config.go`:
    - Scan output directory
-   - Generate schema_paths config
+   - Generate schema_paths config with dependency ordering
 
 2. Add to dump output:
    - Print suggested config after structured dump
+
+## Example Output
+
+After running `supabase db dump --structured`:
+
+```
+supabase/
+└── schemas/
+    ├── extensions.sql
+    ├── roles.sql
+    └── public/
+        ├── types.sql
+        ├── sequences.sql
+        ├── tables/
+        │   ├── employees.sql
+        │   └── managers.sql
+        ├── views/
+        │   └── profiles.sql
+        ├── functions/
+        │   └── get_age.sql
+        ├── triggers/
+        │   └── update_timestamp.sql
+        └── policies/
+            └── employees.sql
+```
+
+**Generated employees.sql:**
+```sql
+create table "employees" (
+  "id" integer not null,
+  "name" text,
+  "age" smallint not null
+);
+```
+
+**Generated profiles.sql (view):**
+```sql
+create view "profiles" as
+  select id, name from "employees";
+```
+
+**Generated get_age.sql (function):**
+```sql
+create function "get_age"(employee_id integer) RETURNS smallint
+  LANGUAGE "sql"
+AS $$
+  select age
+  from employees
+  where id = employee_id;
+$$;
+```
+
+**Suggested config output:**
+```
+Structured dump complete. Add to config.toml:
+
+[db.migrations]
+schema_paths = [
+  "./schemas/extensions.sql",
+  "./schemas/roles.sql",
+  "./schemas/*/types.sql",
+  "./schemas/*/sequences.sql",
+  "./schemas/*/tables/*.sql",
+  "./schemas/*/views/*.sql",
+  "./schemas/*/functions/*.sql",
+  "./schemas/*/triggers/*.sql",
+  "./schemas/*/policies/*.sql",
+]
+```
 
 ## Testing Strategy
 
@@ -321,6 +414,16 @@ schemas/
 ```
 **Rejected:** Large files, harder to diff and review
 
+### Alternative 4: Numeric Prefixes
+```
+schemas/
+├── 00_extensions.sql
+├── 01_roles.sql
+├── public/
+│   ├── 00_types.sql
+```
+**Rejected:** Ordering should be controlled via config, not filename conventions
+
 ## Migration Path
 
 For existing users:
@@ -328,8 +431,9 @@ For existing users:
 1. Run `supabase db dump --structured`
 2. Review generated files in `supabase/schemas/`
 3. Add `schema_paths` config from generated suggestion
-4. Test with `supabase db diff` to verify parity
-5. Commit to version control
+4. Customize ordering if you have specific dependencies
+5. Test with `supabase db diff` to verify parity
+6. Commit to version control
 
 ## Dependencies
 
