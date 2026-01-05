@@ -43,7 +43,7 @@ supabase/
 │   │   ├── types.sql              # Composite types, enums, domains
 │   │   ├── sequences.sql          # Sequences
 │   │   ├── tables/
-│   │   │   ├── users.sql          # Table + indexes + constraints + grants + comments
+│   │   │   ├── users.sql          # Table + indexes + constraints + policies + grants + comments
 │   │   │   └── posts.sql
 │   │   ├── views/
 │   │   │   └── user_posts.sql
@@ -55,8 +55,6 @@ supabase/
 │   │   │   └── process_order.sql
 │   │   ├── triggers/
 │   │   │   └── update_timestamp.sql
-│   │   ├── policies/
-│   │   │   └── users.sql          # All RLS policies for a table
 │   │   └── foreign_tables/
 │   │       └── external_users.sql
 │   │
@@ -90,13 +88,12 @@ supabase/
 | `schemas/{schema}/` | `schema.sql` | `CREATE SCHEMA`, schema-level `GRANT` |
 | `schemas/{schema}/` | `types.sql` | `CREATE TYPE` (enum, composite, range), `CREATE DOMAIN` |
 | `schemas/{schema}/` | `sequences.sql` | `CREATE SEQUENCE` |
-| `schemas/{schema}/tables/` | `{table}.sql` | `CREATE TABLE`, `ALTER TABLE` (constraints), `CREATE INDEX`, table `GRANT`, `COMMENT` |
+| `schemas/{schema}/tables/` | `{table}.sql` | `CREATE TABLE`, `ALTER TABLE` (constraints), `CREATE INDEX`, `CREATE POLICY`, table `GRANT`, `COMMENT` |
 | `schemas/{schema}/views/` | `{view}.sql` | `CREATE VIEW`, view `GRANT`, `COMMENT` |
 | `schemas/{schema}/materialized_views/` | `{mview}.sql` | `CREATE MATERIALIZED VIEW`, indexes, `GRANT`, `COMMENT` |
 | `schemas/{schema}/functions/` | `{function}.sql` | `CREATE FUNCTION` (all overloads), `GRANT`, `COMMENT` |
 | `schemas/{schema}/procedures/` | `{procedure}.sql` | `CREATE PROCEDURE`, `GRANT`, `COMMENT` |
 | `schemas/{schema}/triggers/` | `{trigger}.sql` | `CREATE TRIGGER` |
-| `schemas/{schema}/policies/` | `{table}.sql` | `CREATE POLICY` (all policies for a table) |
 | `schemas/{schema}/foreign_tables/` | `{ftable}.sql` | `CREATE FOREIGN TABLE`, `GRANT` |
 
 ### Managing Dependencies via Config
@@ -146,14 +143,11 @@ schema_paths = [
   # 8. Triggers (depend on tables and functions)
   "./schemas/*/triggers/*.sql",
 
-  # 9. RLS policies (depend on tables)
-  "./schemas/*/policies/*.sql",
-
-  # 10. Replication (depends on tables)
+  # 9. Replication (depends on tables)
   "./cluster/publications.sql",
   "./cluster/subscriptions.sql",
 
-  # 11. Event triggers (last)
+  # 10. Event triggers (last)
   "./cluster/event_triggers.sql",
 ]
 ```
@@ -282,11 +276,10 @@ func GroupStatements(statements []ClassifiedStatement) map[string]*ObjectFile
 ```
 
 **Grouping rules:**
-- Table file: `CREATE TABLE` + `ALTER TABLE ADD CONSTRAINT` + `CREATE INDEX ON` + `GRANT ON TABLE` + `COMMENT ON TABLE/COLUMN`
+- Table file: `CREATE TABLE` + `ALTER TABLE ADD CONSTRAINT` + `CREATE INDEX ON` + `CREATE POLICY` + `GRANT ON TABLE` + `COMMENT ON TABLE/COLUMN`
 - View file: `CREATE VIEW` + `GRANT ON VIEW` + `COMMENT ON VIEW`
 - Function file: All overloads of same function + `GRANT ON FUNCTION` + `COMMENT`
 - Role file: `CREATE ROLE` + `ALTER ROLE` + `GRANT role TO`
-- Policy file: All `CREATE POLICY` for same table (grouped by table name)
 
 ### Phase 3: Directory Writer
 
@@ -327,7 +320,6 @@ func WriteStructuredDump(ctx context.Context, config StructuredDumpConfig, objec
 | Function | `schemas/{schema}/functions/{function}.sql` |
 | Procedure | `schemas/{schema}/procedures/{procedure}.sql` |
 | Trigger | `schemas/{schema}/triggers/{trigger}.sql` |
-| Policy | `schemas/{schema}/policies/{table}.sql` |
 
 ### Phase 4: Command Integration
 
@@ -436,10 +428,8 @@ supabase/
         │   └── managers.sql
         ├── views/
         │   └── profiles.sql
-        ├── functions/
-        │   └── get_age.sql
-        └── policies/
-            └── employees.sql
+        └── functions/
+            └── get_age.sql
 ```
 
 **Generated `roles/app_user.sql`:**
@@ -495,6 +485,16 @@ ALTER TABLE "public"."employees"
 
 CREATE INDEX "employees_name_idx" ON "public"."employees" ("name");
 
+ALTER TABLE "public"."employees" ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "employees_select_policy" ON "public"."employees"
+  FOR SELECT TO "app_user"
+  USING (true);
+
+CREATE POLICY "employees_all_policy" ON "public"."employees"
+  FOR ALL TO "app_admin"
+  USING (true);
+
 GRANT SELECT ON "public"."employees" TO "app_user";
 GRANT ALL ON "public"."employees" TO "app_admin";
 
@@ -521,7 +521,6 @@ schema_paths = [
   "./schemas/*/functions/*.sql",
   "./schemas/*/procedures/*.sql",
   "./schemas/*/triggers/*.sql",
-  "./schemas/*/policies/*.sql",
   "./cluster/publications.sql",
   "./cluster/subscriptions.sql",
   "./cluster/event_triggers.sql",
@@ -545,7 +544,7 @@ schema_paths = [
    - Very large schemas
    - Empty directories (not created)
    - Overloaded functions
-   - Multiple policies per table
+   - Tables with many policies
 
 ## Alternative Considerations
 
