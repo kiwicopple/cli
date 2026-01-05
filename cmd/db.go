@@ -15,6 +15,7 @@ import (
 	"github.com/supabase/cli/internal/db/branch/switch_"
 	"github.com/supabase/cli/internal/db/diff"
 	"github.com/supabase/cli/internal/db/dump"
+	"github.com/supabase/cli/internal/db/watch"
 	"github.com/supabase/cli/internal/db/lint"
 	"github.com/supabase/cli/internal/db/pull"
 	"github.com/supabase/cli/internal/db/push"
@@ -103,6 +104,22 @@ var (
 				fmt.Fprintln(os.Stderr, utils.Yellow("WARNING:"), "--use-pg-schema flag is experimental and may not include all entities, such as views and grants.")
 			}
 			return diff.Run(cmd.Context(), schema, file, flags.DbConfig, differ, afero.NewOsFs())
+		},
+	}
+
+	autoSave bool
+
+	dbWatchCmd = &cobra.Command{
+		Use:   "watch",
+		Short: "Watch schema files and generate migrations on change",
+		Long:  "Watches supabase/schemas/ directory for changes and automatically generates migrations using db diff.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			differ := diff.DiffSchemaMigra
+			if usePgSchema {
+				differ = diff.DiffPgSchema
+				fmt.Fprintln(os.Stderr, utils.Yellow("WARNING:"), "--use-pg-schema flag is experimental and may not include all entities, such as views and grants.")
+			}
+			return watch.Run(cmd.Context(), schema, flags.DbConfig, differ, autoSave, afero.NewOsFs())
 		},
 	}
 
@@ -265,6 +282,12 @@ func init() {
 	diffFlags.StringVarP(&file, "file", "f", "", "Saves schema diff to a new migration file.")
 	diffFlags.StringSliceVarP(&schema, "schema", "s", []string{}, "Comma separated list of schema to include.")
 	dbCmd.AddCommand(dbDiffCmd)
+	// Build watch command
+	watchFlags := dbWatchCmd.Flags()
+	watchFlags.StringSliceVarP(&schema, "schema", "s", []string{}, "Comma separated list of schema to include.")
+	watchFlags.BoolVar(&autoSave, "auto-save", false, "Automatically save migrations with generated names.")
+	watchFlags.BoolVar(&usePgSchema, "use-pg-schema", false, "Use pg-schema-diff to generate schema diff.")
+	dbCmd.AddCommand(dbWatchCmd)
 	// Build dump command
 	dumpFlags := dbDumpCmd.Flags()
 	dumpFlags.BoolVar(&dryRun, "dry-run", false, "Prints the pg_dump script that would be executed.")
