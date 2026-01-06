@@ -39,18 +39,16 @@ supabase/
 │   │   ├── types.sql              # Composite types, enums, domains
 │   │   ├── sequences.sql          # Sequences
 │   │   ├── tables/
-│   │   │   ├── users.sql          # Table + indexes + constraints + policies + grants + comments
+│   │   │   ├── users.sql          # Table + indexes + constraints + policies + triggers + grants + comments
 │   │   │   └── posts.sql
 │   │   ├── views/
-│   │   │   └── user_posts.sql
+│   │   │   └── user_posts.sql     # View + INSTEAD OF triggers + grants + comments
 │   │   ├── materialized_views/
 │   │   │   └── user_stats.sql
 │   │   ├── functions/
-│   │   │   └── get_user.sql
+│   │   │   └── get_user.sql       # Scalar and table-valued functions only
 │   │   ├── procedures/
 │   │   │   └── process_order.sql
-│   │   ├── triggers/
-│   │   │   └── update_timestamp.sql
 │   │   └── foreign_tables/
 │   │       └── external_users.sql
 │   │
@@ -84,12 +82,11 @@ supabase/
 | `schemas/{schema}/` | `schema.sql` | `CREATE SCHEMA`, schema-level `GRANT` |
 | `schemas/{schema}/` | `types.sql` | `CREATE TYPE` (enum, composite, range), `CREATE DOMAIN` |
 | `schemas/{schema}/` | `sequences.sql` | `CREATE SEQUENCE` |
-| `schemas/{schema}/tables/` | `{table}.sql` | `CREATE TABLE`, `ALTER TABLE` (constraints), `CREATE INDEX`, `CREATE POLICY`, table `GRANT`, `COMMENT` |
-| `schemas/{schema}/views/` | `{view}.sql` | `CREATE VIEW`, view `GRANT`, `COMMENT` |
+| `schemas/{schema}/tables/` | `{table}.sql` | `CREATE TABLE`, `ALTER TABLE` (constraints), `CREATE INDEX`, `CREATE POLICY`, BEFORE/AFTER `CREATE TRIGGER`, trigger functions, table `GRANT`, `COMMENT` |
+| `schemas/{schema}/views/` | `{view}.sql` | `CREATE VIEW`, INSTEAD OF `CREATE TRIGGER`, trigger functions, view `GRANT`, `COMMENT` |
 | `schemas/{schema}/materialized_views/` | `{mview}.sql` | `CREATE MATERIALIZED VIEW`, indexes, `GRANT`, `COMMENT` |
-| `schemas/{schema}/functions/` | `{function}.sql` | `CREATE FUNCTION` (all overloads), `GRANT`, `COMMENT` |
+| `schemas/{schema}/functions/` | `{function}.sql` | `CREATE FUNCTION` (scalar/table-valued, all overloads), `GRANT`, `COMMENT` |
 | `schemas/{schema}/procedures/` | `{procedure}.sql` | `CREATE PROCEDURE`, `GRANT`, `COMMENT` |
-| `schemas/{schema}/triggers/` | `{trigger}.sql` | `CREATE TRIGGER` |
 | `schemas/{schema}/foreign_tables/` | `{ftable}.sql` | `CREATE FOREIGN TABLE`, `GRANT` |
 
 ### Managing Dependencies via Config
@@ -131,18 +128,15 @@ schema_paths = [
   "./schemas/*/views/*.sql",
   "./schemas/*/materialized_views/*.sql",
 
-  # 7. Functions and procedures
+  # 7. Functions and procedures (scalar/table-valued only; trigger functions are with their tables/views)
   "./schemas/*/functions/*.sql",
   "./schemas/*/procedures/*.sql",
 
-  # 8. Triggers (depend on tables and functions)
-  "./schemas/*/triggers/*.sql",
-
-  # 9. Replication (depends on tables)
+  # 8. Replication (depends on tables)
   "./cluster/publications.sql",
   "./cluster/subscriptions.sql",
 
-  # 10. Event triggers (last)
+  # 9. Event triggers (last)
   "./cluster/event_triggers.sql",
 ]
 ```
@@ -169,7 +163,8 @@ schema_paths = [
 3. **Clean, descriptive names** - Easier to read and navigate
 4. **All roles together** - Role grants (`GRANT role TO role`) stay with both roles, easier to see hierarchy
 5. **Grouped small objects** - Types, sequences, roles in single files (less clutter)
-6. **Related statements together** - Table file includes its indexes, constraints, policies, grants
+6. **Related statements together** - Table file includes its indexes, constraints, policies, triggers, grants
+7. **Triggers with targets** - Trigger functions (`RETURNS TRIGGER`) are specialized and belong with their trigger; BEFORE/AFTER triggers go with tables, INSTEAD OF triggers go with views
 
 ## Implementation Plan
 
@@ -203,7 +198,8 @@ const (
     TypeMaterializedView StatementType = "materialized_view"
     TypeFunction         StatementType = "function"
     TypeProcedure        StatementType = "procedure"
-    TypeTrigger          StatementType = "trigger"
+    TypeTrigger          StatementType = "trigger"          // BEFORE/AFTER → table, INSTEAD OF → view
+    TypeTriggerFunction  StatementType = "trigger_function" // RETURNS TRIGGER functions
     TypePolicy           StatementType = "policy"
     TypeIndex            StatementType = "index"
     TypeConstraint       StatementType = "constraint"
@@ -242,9 +238,11 @@ func ClassifyStatement(sql string) ClassifiedStatement
 | `CREATE FOREIGN TABLE` | foreign_table |
 | `CREATE VIEW` | view |
 | `CREATE MATERIALIZED VIEW` | materialized_view |
-| `CREATE FUNCTION` | function |
+| `CREATE FUNCTION ... RETURNS TRIGGER` | trigger_function |
+| `CREATE FUNCTION` (other return types) | function |
 | `CREATE PROCEDURE` | procedure |
-| `CREATE TRIGGER` | trigger |
+| `CREATE TRIGGER` (BEFORE/AFTER) | trigger (grouped with table) |
+| `CREATE TRIGGER` (INSTEAD OF) | trigger (grouped with view) |
 | `CREATE POLICY` | policy |
 | `CREATE INDEX` | index |
 | `ALTER TABLE ... ADD CONSTRAINT` | constraint |
@@ -270,10 +268,15 @@ func GroupStatements(statements []ClassifiedStatement) map[string]*ObjectFile
 ```
 
 **Grouping rules:**
-- Table file: `CREATE TABLE` + `ALTER TABLE ADD CONSTRAINT` + `CREATE INDEX ON` + `CREATE POLICY` + `GRANT ON TABLE` + `COMMENT ON TABLE/COLUMN`
-- View file: `CREATE VIEW` + `GRANT ON VIEW` + `COMMENT ON VIEW`
-- Function file: All overloads of same function + `GRANT ON FUNCTION` + `COMMENT`
+- Table file: `CREATE TABLE` + constraints + indexes + policies + BEFORE/AFTER triggers + trigger functions + grants + comments
+- View file: `CREATE VIEW` + INSTEAD OF triggers + trigger functions + grants + comments
+- Function file: All overloads of same function (scalar/table-valued only, not trigger functions) + grants + comments
 - Role file: `CREATE ROLE` + `ALTER ROLE` + `GRANT role TO`
+
+**Trigger function association:**
+- Trigger functions (`RETURNS TRIGGER`) are grouped with the trigger that references them
+- The trigger is grouped with its target table or view
+- This keeps the complete trigger definition (function + trigger) with its target object
 
 ### Phase 3: Directory Writer
 
@@ -307,13 +310,12 @@ func WriteStructuredDump(ctx context.Context, config StructuredDumpConfig, objec
 | Schema | `schemas/{schema}/schema.sql` |
 | Type/Domain | `schemas/{schema}/types.sql` |
 | Sequence | `schemas/{schema}/sequences.sql` |
-| Table | `schemas/{schema}/tables/{table}.sql` |
+| Table | `schemas/{schema}/tables/{table}.sql` (includes BEFORE/AFTER triggers + trigger functions) |
 | Foreign Table | `schemas/{schema}/foreign_tables/{table}.sql` |
-| View | `schemas/{schema}/views/{view}.sql` |
+| View | `schemas/{schema}/views/{view}.sql` (includes INSTEAD OF triggers + trigger functions) |
 | Materialized View | `schemas/{schema}/materialized_views/{mview}.sql` |
-| Function | `schemas/{schema}/functions/{function}.sql` |
+| Function | `schemas/{schema}/functions/{function}.sql` (scalar/table-valued only) |
 | Procedure | `schemas/{schema}/procedures/{procedure}.sql` |
-| Trigger | `schemas/{schema}/triggers/{trigger}.sql` |
 
 ### Phase 4: Command Integration
 
@@ -471,6 +473,7 @@ CREATE TABLE IF NOT EXISTS "public"."employees" (
   "name" text,
   "department_id" integer,
   "age" smallint NOT NULL,
+  "updated_at" timestamptz DEFAULT now(),
   CONSTRAINT "employees_pkey" PRIMARY KEY ("id")
 );
 
@@ -489,6 +492,22 @@ CREATE POLICY "employees_select_policy" ON "public"."employees"
 CREATE POLICY "employees_all_policy" ON "public"."employees"
   FOR ALL TO "app_admin"
   USING (true);
+
+-- Trigger function and trigger defined together with the table
+CREATE OR REPLACE FUNCTION "public"."employees_update_timestamp"()
+  RETURNS TRIGGER
+  LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER "employees_update_timestamp_trigger"
+  BEFORE UPDATE ON "public"."employees"
+  FOR EACH ROW
+  EXECUTE FUNCTION "public"."employees_update_timestamp"();
 
 GRANT SELECT ON "public"."employees" TO "app_user";
 GRANT ALL ON "public"."employees" TO "app_admin";
@@ -515,7 +534,6 @@ schema_paths = [
   "./schemas/*/materialized_views/*.sql",
   "./schemas/*/functions/*.sql",
   "./schemas/*/procedures/*.sql",
-  "./schemas/*/triggers/*.sql",
   "./cluster/publications.sql",
   "./cluster/subscriptions.sql",
   "./cluster/event_triggers.sql",
@@ -549,8 +567,8 @@ schema_paths = [
 ### Alternative 2: One file per role
 **Rejected:** Role grants (`GRANT role TO role`) logically belong with both roles; single file keeps hierarchy visible
 
-### Alternative 3: Triggers with their tables
-**Rejected:** Triggers often reference functions; keeping them separate allows proper ordering
+### Alternative 3: Triggers in separate files
+**Rejected:** Trigger functions (`RETURNS TRIGGER`) can only be used as triggers, so they belong with their target table/view. INSTEAD OF triggers only work on views. Keeping trigger + trigger function together with the target object is more cohesive.
 
 ### Alternative 4: Numeric prefixes for ordering
 **Rejected:** Ordering should be controlled via config, not filename conventions
