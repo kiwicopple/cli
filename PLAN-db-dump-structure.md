@@ -19,34 +19,6 @@ Implement a new mode for the `db dump` command that outputs the database structu
 schema_paths = ["./schemas/*.sql"]  # Already supports glob patterns
 ```
 
-## Schema Structure Versioning
-
-The directory structure is versioned in `config.toml` to allow evolution over time while maintaining backwards compatibility:
-
-```toml
-[db.migrations]
-schema_version = 1
-schema_paths = [...]
-```
-
-### How Versioning Works
-
-1. **On `db dump --structured`**: Writes files using the latest structure version and sets `schema_version` in config
-2. **On `db diff` / `db push`**: Reads `schema_version` to understand the expected structure
-3. **Version upgrades**: Future CLI versions can migrate older structures or warn about deprecated layouts
-
-### Version History
-
-| Version | Description |
-|---------|-------------|
-| 1 | Initial structure: `cluster/` for cluster-wide objects, `schemas/{schema}/` for schema-scoped objects. Triggers grouped with tables/views. |
-
-### Future Considerations
-
-- **Adding new object types**: New PostgreSQL features can be added without breaking existing structures
-- **Structure reorganization**: Major changes increment the version; CLI can provide migration guidance
-- **Deprecation path**: Old versions remain supported for a period with warnings
-
 ## Proposed Directory Structure
 
 Separate cluster-wide objects from schema-scoped objects:
@@ -124,7 +96,6 @@ Schema files are run in lexicographic order by default. For projects with depend
 **Example: Simple project (default ordering)**
 ```toml
 [db.migrations]
-schema_version = 1
 schema_paths = [
   "./cluster/*.sql",
   "./schemas/**/*.sql",
@@ -134,7 +105,6 @@ schema_paths = [
 **Example: Project with full dependency ordering**
 ```toml
 [db.migrations]
-schema_version = 1
 schema_paths = [
   # 1. Cluster-level objects
   "./cluster/roles.sql",
@@ -174,7 +144,6 @@ schema_paths = [
 **Example: Specific table ordering for foreign keys**
 ```toml
 [db.migrations]
-schema_version = 1
 schema_paths = [
   "./cluster/*.sql",
   "./schemas/*/schema.sql",
@@ -552,7 +521,6 @@ COMMENT ON COLUMN "public"."employees"."age" IS 'Employee age in years';
 Structured dump complete. Add to config.toml:
 
 [db.migrations]
-schema_version = 1
 schema_paths = [
   "./cluster/roles.sql",
   "./cluster/extensions.sql",
