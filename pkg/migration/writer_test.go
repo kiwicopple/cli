@@ -200,7 +200,7 @@ func TestFilterBySchemasEmpty(t *testing.T) {
 	assert.Len(t, filtered, 3)
 }
 
-func TestListSchemas(t *testing.T) {
+func TestGetSchemaNames(t *testing.T) {
 	objects := map[string]*ObjectFile{
 		"cluster/roles": {Category: "cluster", Name: "roles"},
 		"schemas/public/tables/users": {
@@ -217,7 +217,7 @@ func TestListSchemas(t *testing.T) {
 		},
 	}
 
-	schemas := ListSchemas(objects)
+	schemas := GetSchemaNames(objects)
 	assert.Len(t, schemas, 2)
 	assert.Contains(t, schemas, "public")
 	assert.Contains(t, schemas, "api")

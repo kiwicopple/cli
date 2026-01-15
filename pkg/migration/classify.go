@@ -1,10 +1,8 @@
 package migration
 
 import (
+	"regexp"
 	"strings"
-
-	"github.com/multigres/multigres/go/parser"
-	"github.com/multigres/multigres/go/parser/ast"
 )
 
 // StatementType represents the type of a SQL statement for classification
@@ -61,248 +59,276 @@ type ClassifiedStatement struct {
 	Statement     string
 }
 
-// ClassifyStatement classifies a single SQL statement using the multigres parser
+// Regex patterns for SQL statement classification
+var (
+	// Identifier pattern: handles quoted and unquoted identifiers
+	identPattern   = `(?:"([^"]+)"|([a-zA-Z_][a-zA-Z0-9_]*))`
+	qualifiedIdent = identPattern + `(?:\.` + identPattern + `)?`
+
+	// Statement patterns
+	createRoleRe = regexp.MustCompile(`(?i)^\s*CREATE\s+ROLE\s+` + identPattern)
+	alterRoleRe  = regexp.MustCompile(`(?i)^\s*ALTER\s+ROLE\s+` + identPattern)
+	grantRoleRe  = regexp.MustCompile(`(?i)^\s*GRANT\s+` + identPattern + `\s+TO\s+`)
+
+	createExtensionRe = regexp.MustCompile(`(?i)^\s*CREATE\s+EXTENSION\s+(?:IF\s+NOT\s+EXISTS\s+)?` + identPattern)
+
+	createSchemaRe = regexp.MustCompile(`(?i)^\s*CREATE\s+SCHEMA\s+(?:IF\s+NOT\s+EXISTS\s+)?` + identPattern)
+
+	createTypeRe   = regexp.MustCompile(`(?i)^\s*CREATE\s+TYPE\s+` + qualifiedIdent)
+	createDomainRe = regexp.MustCompile(`(?i)^\s*CREATE\s+DOMAIN\s+` + qualifiedIdent)
+
+	createSequenceRe = regexp.MustCompile(`(?i)^\s*CREATE\s+SEQUENCE\s+(?:IF\s+NOT\s+EXISTS\s+)?` + qualifiedIdent)
+
+	createTableRe        = regexp.MustCompile(`(?i)^\s*CREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?` + qualifiedIdent)
+	createForeignTableRe = regexp.MustCompile(`(?i)^\s*CREATE\s+FOREIGN\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?` + qualifiedIdent)
+
+	createViewRe    = regexp.MustCompile(`(?i)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?VIEW\s+` + qualifiedIdent)
+	createMatViewRe = regexp.MustCompile(`(?i)^\s*CREATE\s+MATERIALIZED\s+VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?` + qualifiedIdent)
+
+	createFunctionRe  = regexp.MustCompile(`(?i)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+` + qualifiedIdent)
+	createProcedureRe = regexp.MustCompile(`(?i)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+` + qualifiedIdent)
+	returnsTriggerRe  = regexp.MustCompile(`(?i)RETURNS\s+TRIGGER\b`)
+
+	createTriggerRe = regexp.MustCompile(`(?i)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\s+` + identPattern + `\s+(BEFORE|AFTER|INSTEAD\s+OF)\s+.*?\s+ON\s+` + qualifiedIdent)
+
+	createPolicyRe = regexp.MustCompile(`(?i)^\s*CREATE\s+POLICY\s+` + identPattern + `\s+ON\s+` + qualifiedIdent)
+
+	createIndexRe = regexp.MustCompile(`(?i)^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?` + identPattern + `\s+ON\s+(?:ONLY\s+)?` + qualifiedIdent)
+
+	alterTableRe    = regexp.MustCompile(`(?i)^\s*ALTER\s+TABLE\s+(?:ONLY\s+)?` + qualifiedIdent)
+	addConstraintRe = regexp.MustCompile(`(?i)ADD\s+CONSTRAINT\s+` + identPattern)
+
+	grantOnRe = regexp.MustCompile(`(?i)^\s*GRANT\s+.*?\s+ON\s+(?:ALL\s+\w+\s+IN\s+SCHEMA\s+` + identPattern + `|(?:TABLE\s+|SEQUENCE\s+|FUNCTION\s+|PROCEDURE\s+|SCHEMA\s+)?` + qualifiedIdent + `)`)
+
+	commentOnRe     = regexp.MustCompile(`(?i)^\s*COMMENT\s+ON\s+(\w+)\s+` + qualifiedIdent)
+	commentColumnRe = regexp.MustCompile(`(?i)^\s*COMMENT\s+ON\s+COLUMN\s+` + qualifiedIdent + `\.` + identPattern)
+
+	createFdwRe         = regexp.MustCompile(`(?i)^\s*CREATE\s+FOREIGN\s+DATA\s+WRAPPER\s+` + identPattern)
+	createServerRe      = regexp.MustCompile(`(?i)^\s*CREATE\s+SERVER\s+` + identPattern)
+	createUserMappingRe = regexp.MustCompile(`(?i)^\s*CREATE\s+USER\s+MAPPING\s+`)
+
+	createPublicationRe  = regexp.MustCompile(`(?i)^\s*CREATE\s+PUBLICATION\s+` + identPattern)
+	createSubscriptionRe = regexp.MustCompile(`(?i)^\s*CREATE\s+SUBSCRIPTION\s+` + identPattern)
+
+	createEventTriggerRe = regexp.MustCompile(`(?i)^\s*CREATE\s+EVENT\s+TRIGGER\s+` + identPattern)
+)
+
+// ClassifyStatement classifies a single SQL statement
 func ClassifyStatement(sql string) ClassifiedStatement {
 	result := ClassifiedStatement{
 		Type:      TypeOther,
 		Statement: sql,
 	}
 
-	stmts, err := parser.ParseSQL(sql)
-	if err != nil || len(stmts) == 0 {
+	trimmed := strings.TrimSpace(sql)
+	upper := strings.ToUpper(trimmed)
+
+	// Role statements
+	if matches := createRoleRe.FindStringSubmatch(trimmed); matches != nil {
+		result.Type = TypeRole
+		result.ObjectName = extractName(matches, 1)
+		return result
+	}
+	if matches := alterRoleRe.FindStringSubmatch(trimmed); matches != nil {
+		result.Type = TypeRole
+		result.ObjectName = extractName(matches, 1)
+		return result
+	}
+	if grantRoleRe.MatchString(trimmed) && !strings.Contains(upper, " ON ") {
+		result.Type = TypeRole
 		return result
 	}
 
-	stmt := stmts[0]
-
-	switch node := stmt.(type) {
-	// Role statements
-	case *ast.CreateRoleStmt:
-		result.Type = TypeRole
-		result.ObjectName = node.Role
-		return result
-
-	case *ast.AlterRoleStmt:
-		result.Type = TypeRole
-		result.ObjectName = node.Role
-		return result
-
 	// Extension
-	case *ast.CreateExtensionStmt:
+	if matches := createExtensionRe.FindStringSubmatch(trimmed); matches != nil {
 		result.Type = TypeExtension
-		result.ObjectName = node.Extname
+		result.ObjectName = extractName(matches, 1)
 		return result
+	}
+
+	// Foreign Data Wrapper related
+	if matches := createFdwRe.FindStringSubmatch(trimmed); matches != nil {
+		result.Type = TypeForeignDataWrapper
+		result.ObjectName = extractName(matches, 1)
+		return result
+	}
+	if matches := createServerRe.FindStringSubmatch(trimmed); matches != nil {
+		result.Type = TypeForeignServer
+		result.ObjectName = extractName(matches, 1)
+		return result
+	}
+	if createUserMappingRe.MatchString(trimmed) {
+		result.Type = TypeUserMapping
+		return result
+	}
+
+	// Publication/Subscription
+	if matches := createPublicationRe.FindStringSubmatch(trimmed); matches != nil {
+		result.Type = TypePublication
+		result.ObjectName = extractName(matches, 1)
+		return result
+	}
+	if matches := createSubscriptionRe.FindStringSubmatch(trimmed); matches != nil {
+		result.Type = TypeSubscription
+		result.ObjectName = extractName(matches, 1)
+		return result
+	}
+
+	// Event Trigger
+	if matches := createEventTriggerRe.FindStringSubmatch(trimmed); matches != nil {
+		result.Type = TypeEventTrigger
+		result.ObjectName = extractName(matches, 1)
+		return result
+	}
 
 	// Schema
-	case *ast.CreateSchemaStmt:
+	if matches := createSchemaRe.FindStringSubmatch(trimmed); matches != nil {
 		result.Type = TypeSchema
-		result.ObjectName = node.Schemaname
+		result.ObjectName = extractName(matches, 1)
 		return result
+	}
+
+	// Type/Domain
+	if matches := createTypeRe.FindStringSubmatch(trimmed); matches != nil {
+		result.Type = TypeType
+		result.Schema, result.ObjectName = extractQualifiedName(matches, 1)
+		return result
+	}
+	if matches := createDomainRe.FindStringSubmatch(trimmed); matches != nil {
+		result.Type = TypeType
+		result.Schema, result.ObjectName = extractQualifiedName(matches, 1)
+		return result
+	}
 
 	// Sequence
-	case *ast.CreateSeqStmt:
+	if matches := createSequenceRe.FindStringSubmatch(trimmed); matches != nil {
 		result.Type = TypeSequence
-		if node.Sequence != nil {
-			result.Schema = defaultSchema(node.Sequence.Schemaname)
-			result.ObjectName = node.Sequence.Relname
-		}
+		result.Schema, result.ObjectName = extractQualifiedName(matches, 1)
 		return result
+	}
+
+	// Foreign Table (must check before regular table)
+	if matches := createForeignTableRe.FindStringSubmatch(trimmed); matches != nil {
+		result.Type = TypeForeignTable
+		result.Schema, result.ObjectName = extractQualifiedName(matches, 1)
+		return result
+	}
 
 	// Table
-	case *ast.CreateStmt:
+	if matches := createTableRe.FindStringSubmatch(trimmed); matches != nil {
 		result.Type = TypeTable
-		if node.Relation != nil {
-			result.Schema = defaultSchema(node.Relation.Schemaname)
-			result.ObjectName = node.Relation.Relname
-		}
+		result.Schema, result.ObjectName = extractQualifiedName(matches, 1)
 		return result
+	}
 
-	// Foreign Table
-	case *ast.CreateForeignTableStmt:
-		result.Type = TypeForeignTable
-		if node.Base != nil && node.Base.Relation != nil {
-			result.Schema = defaultSchema(node.Base.Relation.Schemaname)
-			result.ObjectName = node.Base.Relation.Relname
-		}
+	// Materialized View (must check before regular view)
+	if matches := createMatViewRe.FindStringSubmatch(trimmed); matches != nil {
+		result.Type = TypeMaterializedView
+		result.Schema, result.ObjectName = extractQualifiedName(matches, 1)
 		return result
+	}
 
 	// View
-	case *ast.ViewStmt:
+	if matches := createViewRe.FindStringSubmatch(trimmed); matches != nil {
 		result.Type = TypeView
-		if node.View != nil {
-			result.Schema = defaultSchema(node.View.Schemaname)
-			result.ObjectName = node.View.Relname
-		}
+		result.Schema, result.ObjectName = extractQualifiedName(matches, 1)
 		return result
+	}
 
-	// Function/Procedure
-	case *ast.CreateFunctionStmt:
-		if node.Funcname != nil && len(node.Funcname) > 0 {
-			result.Schema, result.ObjectName = extractQualifiedNameFromList(node.Funcname)
-		}
-		// Check if it's a trigger function
-		if isTriggerFunction(node) {
+	// Procedure (must check before function)
+	if matches := createProcedureRe.FindStringSubmatch(trimmed); matches != nil {
+		result.Type = TypeProcedure
+		result.Schema, result.ObjectName = extractQualifiedName(matches, 1)
+		return result
+	}
+
+	// Function
+	if matches := createFunctionRe.FindStringSubmatch(trimmed); matches != nil {
+		result.Schema, result.ObjectName = extractQualifiedName(matches, 1)
+		if returnsTriggerRe.MatchString(trimmed) {
 			result.Type = TypeTriggerFunction
-		} else if node.IsProcedure {
-			result.Type = TypeProcedure
 		} else {
 			result.Type = TypeFunction
 		}
 		return result
+	}
 
 	// Trigger
-	case *ast.CreateTrigStmt:
+	if matches := createTriggerRe.FindStringSubmatch(trimmed); matches != nil {
 		result.Type = TypeTrigger
-		result.ObjectName = node.Trigname
-		if node.Relation != nil {
-			result.ParentSchema = defaultSchema(node.Relation.Schemaname)
-			result.ParentName = node.Relation.Relname
+		result.ObjectName = extractName(matches, 1)
+
+		// Extract timing
+		timing := strings.ToUpper(matches[3])
+		if strings.Contains(timing, "INSTEAD") {
+			result.TriggerTiming = TriggerInsteadOf
+		} else if timing == "BEFORE" {
+			result.TriggerTiming = TriggerBefore
+		} else {
+			result.TriggerTiming = TriggerAfter
 		}
-		// Determine timing
-		result.TriggerTiming = getTriggerTiming(node)
+
+		// Extract parent table/view
+		result.ParentSchema, result.ParentName = extractQualifiedName(matches, 4)
 		return result
+	}
 
 	// Policy
-	case *ast.CreatePolicyStmt:
+	if matches := createPolicyRe.FindStringSubmatch(trimmed); matches != nil {
 		result.Type = TypePolicy
-		result.ObjectName = node.PolicyName
-		if node.Table != nil {
-			result.ParentSchema = defaultSchema(node.Table.Schemaname)
-			result.ParentName = node.Table.Relname
-		}
+		result.ObjectName = extractName(matches, 1)
+		result.ParentSchema, result.ParentName = extractQualifiedName(matches, 3)
 		return result
+	}
 
 	// Index
-	case *ast.IndexStmt:
+	if matches := createIndexRe.FindStringSubmatch(trimmed); matches != nil {
 		result.Type = TypeIndex
-		result.ObjectName = node.Idxname
-		if node.Relation != nil {
-			result.ParentSchema = defaultSchema(node.Relation.Schemaname)
-			result.ParentName = node.Relation.Relname
-		}
+		result.ObjectName = extractName(matches, 1)
+		result.ParentSchema, result.ParentName = extractQualifiedName(matches, 3)
 		return result
-
-	// Type statements
-	case *ast.CreateEnumStmt:
-		result.Type = TypeType
-		result.Schema, result.ObjectName = extractQualifiedNameFromList(node.TypeName)
-		return result
-
-	case *ast.CreateRangeStmt:
-		result.Type = TypeType
-		result.Schema, result.ObjectName = extractQualifiedNameFromList(node.TypeName)
-		return result
-
-	case *ast.CompositeTypeStmt:
-		result.Type = TypeType
-		if node.Typevar != nil {
-			result.Schema = defaultSchema(node.Typevar.Schemaname)
-			result.ObjectName = node.Typevar.Relname
-		}
-		return result
-
-	case *ast.CreateDomainStmt:
-		result.Type = TypeType
-		result.Schema, result.ObjectName = extractQualifiedNameFromList(node.Domainname)
-		return result
+	}
 
 	// ALTER TABLE (for constraints)
-	case *ast.AlterTableStmt:
-		if node.Relation != nil {
-			parentSchema := defaultSchema(node.Relation.Schemaname)
-			parentName := node.Relation.Relname
-
-			// Check if it's adding a constraint
-			for _, cmd := range node.Cmds {
-				if alterCmd, ok := cmd.(*ast.AlterTableCmd); ok {
-					if alterCmd.Subtype == ast.AT_AddConstraint && alterCmd.Def != nil {
-						if constraint, ok := alterCmd.Def.(*ast.Constraint); ok {
-							result.Type = TypeConstraint
-							result.ObjectName = constraint.Conname
-							result.ParentSchema = parentSchema
-							result.ParentName = parentName
-							return result
-						}
-					}
-				}
-			}
-			// Other ALTER TABLE statements go with the table
-			result.Type = TypeTable
-			result.Schema = parentSchema
-			result.ObjectName = parentName
+	if matches := alterTableRe.FindStringSubmatch(trimmed); matches != nil {
+		parentSchema, parentName := extractQualifiedName(matches, 1)
+		if constraintMatches := addConstraintRe.FindStringSubmatch(trimmed); constraintMatches != nil {
+			result.Type = TypeConstraint
+			result.ObjectName = extractName(constraintMatches, 1)
+			result.ParentSchema = parentSchema
+			result.ParentName = parentName
+			return result
 		}
+		// Other ALTER TABLE statements go with the table
+		result.Type = TypeTable
+		result.Schema = parentSchema
+		result.ObjectName = parentName
 		return result
+	}
 
-	// Grant statements
-	case *ast.GrantStmt:
+	// Grant
+	if matches := grantOnRe.FindStringSubmatch(trimmed); matches != nil {
 		result.Type = TypeGrant
-		if len(node.Objects) > 0 {
-			if rangeVar, ok := node.Objects[0].(*ast.RangeVar); ok {
-				result.ParentSchema = defaultSchema(rangeVar.Schemaname)
-				result.ParentName = rangeVar.Relname
-			}
+		// Try to extract schema and object
+		if matches[1] != "" || matches[2] != "" {
+			// GRANT ... ON ALL ... IN SCHEMA or ON SCHEMA
+			result.ParentSchema = extractName(matches, 1)
+		} else {
+			result.ParentSchema, result.ParentName = extractQualifiedName(matches, 3)
 		}
 		return result
-
-	case *ast.GrantRoleStmt:
-		result.Type = TypeRole
-		return result
+	}
 
 	// Comment
-	case *ast.CommentStmt:
+	if matches := commentColumnRe.FindStringSubmatch(trimmed); matches != nil {
 		result.Type = TypeComment
-		if node.Object != nil {
-			switch obj := node.Object.(type) {
-			case *ast.RangeVar:
-				result.Schema = defaultSchema(obj.Schemaname)
-				result.ObjectName = obj.Relname
-			case []ast.Node:
-				result.Schema, result.ObjectName = extractQualifiedNameFromNodes(obj)
-			}
-		}
+		result.ParentSchema, result.ParentName = extractQualifiedName(matches, 1)
+		result.ObjectName = extractName(matches, 5)
 		return result
-
-	// Materialized View
-	case *ast.CreateTableAsStmt:
-		if node.Relkind == ast.OBJECT_MATVIEW {
-			result.Type = TypeMaterializedView
-			if node.Into != nil && node.Into.Rel != nil {
-				result.Schema = defaultSchema(node.Into.Rel.Schemaname)
-				result.ObjectName = node.Into.Rel.Relname
-			}
-		}
-		return result
-
-	// Foreign Data Wrapper
-	case *ast.CreateFdwStmt:
-		result.Type = TypeForeignDataWrapper
-		result.ObjectName = node.Fdwname
-		return result
-
-	case *ast.CreateForeignServerStmt:
-		result.Type = TypeForeignServer
-		result.ObjectName = node.Servername
-		return result
-
-	case *ast.CreateUserMappingStmt:
-		result.Type = TypeUserMapping
-		return result
-
-	// Publication/Subscription
-	case *ast.CreatePublicationStmt:
-		result.Type = TypePublication
-		result.ObjectName = node.Pubname
-		return result
-
-	case *ast.CreateSubscriptionStmt:
-		result.Type = TypeSubscription
-		result.ObjectName = node.Subname
-		return result
-
-	// Event Trigger
-	case *ast.CreateEventTrigStmt:
-		result.Type = TypeEventTrigger
-		result.ObjectName = node.Trigname
+	}
+	if matches := commentOnRe.FindStringSubmatch(trimmed); matches != nil {
+		result.Type = TypeComment
+		result.Schema, result.ObjectName = extractQualifiedName(matches, 2)
 		return result
 	}
 
@@ -321,60 +347,41 @@ func ClassifyStatements(statements []string) []ClassifiedStatement {
 	return results
 }
 
-// Helper functions
-
-func defaultSchema(schema string) string {
-	if schema == "" {
-		return "public"
+// extractName extracts a name from regex matches (handles quoted/unquoted)
+func extractName(matches []string, startIdx int) string {
+	if startIdx >= len(matches) {
+		return ""
 	}
-	return schema
+	// Quoted name
+	if matches[startIdx] != "" {
+		return matches[startIdx]
+	}
+	// Unquoted name
+	if startIdx+1 < len(matches) && matches[startIdx+1] != "" {
+		return matches[startIdx+1]
+	}
+	return ""
 }
 
-func extractQualifiedNameFromList(names []string) (schema, name string) {
-	if len(names) == 0 {
+// extractQualifiedName extracts schema.name from regex matches
+func extractQualifiedName(matches []string, startIdx int) (schema, name string) {
+	if startIdx >= len(matches) {
 		return "public", ""
 	}
-	if len(names) == 1 {
-		return "public", names[0]
-	}
-	return names[0], names[len(names)-1]
-}
 
-func extractQualifiedNameFromNodes(nodes []ast.Node) (schema, name string) {
-	var parts []string
-	for _, n := range nodes {
-		if str, ok := n.(*ast.String); ok {
-			parts = append(parts, str.Sval)
+	// First identifier (could be schema or name)
+	first := extractName(matches, startIdx)
+
+	// Second identifier (if present, first was schema)
+	if startIdx+2 < len(matches) {
+		second := extractName(matches, startIdx+2)
+		if second != "" {
+			return first, second
 		}
 	}
-	return extractQualifiedNameFromList(parts)
-}
 
-func isTriggerFunction(node *ast.CreateFunctionStmt) bool {
-	if node.ReturnType == nil {
-		return false
-	}
-	// Check if return type is TRIGGER
-	if len(node.ReturnType.Names) > 0 {
-		for _, n := range node.ReturnType.Names {
-			if str, ok := n.(*ast.String); ok {
-				if strings.EqualFold(str.Sval, "trigger") {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-func getTriggerTiming(node *ast.CreateTrigStmt) TriggerTiming {
-	if node.Timing&ast.TRIGGER_TYPE_INSTEAD != 0 {
-		return TriggerInsteadOf
-	}
-	if node.Timing&ast.TRIGGER_TYPE_BEFORE != 0 {
-		return TriggerBefore
-	}
-	return TriggerAfter
+	// Only one identifier - default to public schema
+	return "public", first
 }
 
 // isSchemaScoped returns true if the statement type is schema-scoped

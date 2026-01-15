@@ -9,9 +9,7 @@ import (
 	"strings"
 
 	"github.com/go-errors/errors"
-	"github.com/jackc/pgconn"
 	"github.com/spf13/afero"
-	"github.com/supabase/cli/pkg/parser"
 )
 
 // StructuredDumpConfig configures the structured dump output
@@ -76,29 +74,6 @@ func WriteStructuredDump(ctx context.Context, config StructuredDumpConfig, objec
 	return nil
 }
 
-// DumpStructured performs a structured dump from a database connection
-func DumpStructured(ctx context.Context, config pgconn.Config, dumpConfig StructuredDumpConfig, fsys afero.Fs, exec DumpFunc) error {
-	// Get the raw dump
-	var buf strings.Builder
-	if err := DumpSchema(ctx, config, &buf, exec); err != nil {
-		return err
-	}
-
-	// Parse and classify statements
-	statements, err := parser.SplitAndTrim(strings.NewReader(buf.String()))
-	if err != nil {
-		return errors.Errorf("failed to split SQL statements: %w", err)
-	}
-
-	classified := ClassifyStatements(statements)
-
-	// Group statements
-	objects := GroupStatements(classified)
-
-	// Write to directory structure
-	return WriteStructuredDump(ctx, dumpConfig, objects, fsys)
-}
-
 // GenerateSchemaPathsConfig generates recommended schema_paths config
 func GenerateSchemaPathsConfig(baseDir string, fsys afero.Fs) ([]string, error) {
 	var paths []string
@@ -160,8 +135,8 @@ func PrintSchemaPathsConfig(w io.Writer, paths []string) {
 	fmt.Fprintln(w, "]")
 }
 
-// ListSchemas returns a list of schema names from the grouped objects
-func ListSchemas(objects map[string]*ObjectFile) []string {
+// GetSchemaNames returns a list of schema names from the grouped objects
+func GetSchemaNames(objects map[string]*ObjectFile) []string {
 	schemaSet := make(map[string]bool)
 	for _, obj := range objects {
 		if obj.Category == "schemas" && obj.Schema != "" {
