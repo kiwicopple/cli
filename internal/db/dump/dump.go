@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/docker/docker/api/types/container"
@@ -15,6 +16,7 @@ import (
 	"github.com/spf13/afero"
 	"github.com/supabase/cli/internal/utils"
 	"github.com/supabase/cli/pkg/migration"
+	"github.com/supabase/cli/pkg/parser"
 )
 
 func Run(ctx context.Context, path string, config pgconn.Config, dataOnly, roleOnly, dryRun bool, fsys afero.Fs, opts ...migration.DumpOptionFunc) error {
@@ -84,4 +86,77 @@ func DockerExec(ctx context.Context, script string, env []string, w io.Writer) e
 		w,
 		os.Stderr,
 	)
+}
+
+// RunStructured performs a structured dump to a directory hierarchy
+func RunStructured(ctx context.Context, outputDir string, schemas []string, config pgconn.Config, fsys afero.Fs) error {
+	// Determine output directory
+	baseDir := outputDir
+	if baseDir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return errors.Errorf("failed to get working directory: %w", err)
+		}
+		baseDir = filepath.Join(cwd, "supabase")
+	}
+
+	db := "remote"
+	if utils.IsLocalDatabase(config) {
+		db = "local"
+	}
+	fmt.Fprintf(os.Stderr, "Dumping structured schema from %s database...\n", db)
+
+	// Get the raw dump
+	var buf strings.Builder
+	if err := migration.DumpSchema(ctx, config, &buf, DockerExec); err != nil {
+		return err
+	}
+
+	// Parse and classify statements
+	statements, err := parser.SplitAndTrim(strings.NewReader(buf.String()))
+	if err != nil {
+		return errors.Errorf("failed to split SQL statements: %w", err)
+	}
+
+	classified := migration.ClassifyStatements(statements)
+
+	// Group statements
+	objects := migration.GroupStatements(classified)
+
+	// Filter by schemas if specified
+	if len(schemas) > 0 {
+		objects = migration.FilterBySchemas(objects, schemas)
+	}
+
+	// Create directory structure
+	if err := migration.EnsureBaseDir(baseDir, fsys); err != nil {
+		return err
+	}
+
+	// Clean existing structured files
+	if err := migration.CleanOutputDir(baseDir, fsys); err != nil {
+		return err
+	}
+
+	// Write structured dump
+	dumpConfig := migration.StructuredDumpConfig{
+		BaseDir:      baseDir,
+		Schemas:      schemas,
+		IncludeRoles: true,
+	}
+	if err := migration.WriteStructuredDump(ctx, dumpConfig, objects, fsys); err != nil {
+		return err
+	}
+
+	// Print summary
+	migration.PrintSummary(os.Stderr, objects)
+
+	// Generate and print suggested config
+	paths, err := migration.GenerateSchemaPathsConfig(baseDir, fsys)
+	if err != nil {
+		return err
+	}
+	migration.PrintSchemaPathsConfig(os.Stderr, paths)
+
+	return nil
 }

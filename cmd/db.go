@@ -111,6 +111,8 @@ var (
 	roleOnly     bool
 	keepComments bool
 	excludeTable []string
+	structured   bool
+	outputDir    string
 
 	dbDumpCmd = &cobra.Command{
 		Use:   "dump",
@@ -121,6 +123,9 @@ var (
 			}
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if structured {
+				return dump.RunStructured(cmd.Context(), outputDir, schema, flags.DbConfig, afero.NewOsFs())
+			}
 			opts := []migration.DumpOptionFunc{
 				migration.WithSchema(schema...),
 				migration.WithoutTable(excludeTable...),
@@ -284,6 +289,9 @@ func init() {
 	cobra.CheckErr(viper.BindPFlag("DB_PASSWORD", dumpFlags.Lookup("password")))
 	dumpFlags.StringSliceVarP(&schema, "schema", "s", []string{}, "Comma separated list of schema to include.")
 	dbDumpCmd.MarkFlagsMutuallyExclusive("schema", "role-only")
+	dumpFlags.BoolVarP(&structured, "structured", "S", false, "Dumps schema to a structured directory hierarchy for declarative management.")
+	dumpFlags.StringVar(&outputDir, "output-dir", "", "Output directory for structured dump (default: current supabase dir).")
+	dbDumpCmd.MarkFlagsMutuallyExclusive("structured", "data-only", "role-only", "file")
 	dbCmd.AddCommand(dbDumpCmd)
 	// Build push command
 	pushFlags := dbPushCmd.Flags()

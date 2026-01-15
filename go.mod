@@ -37,6 +37,8 @@ require (
 	github.com/jackc/pgx/v4 v4.18.3
 	github.com/joho/godotenv v1.5.1
 	github.com/mithrandie/csvq-driver v1.7.0
+	github.com/multigres/multigres v0.0.0-20241210000000-000000000000
+	github.com/pganalyze/pg_query_go/v5 v5.1.0
 	github.com/muesli/reflow v0.3.0
 	github.com/oapi-codegen/nullable v1.1.0
 	github.com/olekukonko/tablewriter v1.1.2
