@@ -172,7 +172,51 @@ schema_paths = [
 
 **File:** `pkg/migration/classify.go`
 
-Create a statement classifier that parses pg_dump output and categorizes each statement:
+Create a statement classifier using a PostgreSQL parser (e.g., `multigres` or `pg_query_go`) rather than regex for accurate parsing:
+
+**Why use a real PostgreSQL parser:**
+- 100% accurate parsing of all PostgreSQL syntax
+- Handles edge cases: quoted identifiers, dollar-quoting, complex expressions
+- AST node types map directly to our categories
+- Extract schema/object names directly from parse tree
+- Future-proof for new PostgreSQL syntax
+
+**Example using multigres:**
+```go
+import (
+    "github.com/multigres/multigres/go/parser"
+    "github.com/multigres/multigres/go/parser/ast"
+)
+
+func ClassifyStatement(sql string) ClassifiedStatement {
+    stmts, err := parser.ParseSQL(sql)
+    if err != nil {
+        return ClassifiedStatement{Type: TypeOther, Statement: sql}
+    }
+
+    switch node := stmts[0].(type) {
+    case *ast.CreateStmt:
+        return ClassifiedStatement{
+            Type:       TypeTable,
+            Schema:     node.Relation.Schemaname,
+            ObjectName: node.Relation.Relname,
+            Statement:  sql,
+        }
+    case *ast.CreateFunctionStmt:
+        // Check return type for TRIGGER
+        if isTriggerFunction(node) {
+            return ClassifiedStatement{Type: TypeTriggerFunction, ...}
+        }
+        return ClassifiedStatement{Type: TypeFunction, ...}
+    case *ast.CreateTrigStmt:
+        // Check timing for INSTEAD OF vs BEFORE/AFTER
+        ...
+    // ... other cases
+    }
+}
+```
+
+**Statement types to classify:
 
 ```go
 type StatementType string
@@ -219,35 +263,33 @@ type ClassifiedStatement struct {
 func ClassifyStatement(sql string) ClassifiedStatement
 ```
 
-**Classification patterns:**
+**AST node type mapping:**
 
-| Pattern | Type |
-|---------|------|
-| `CREATE ROLE` / `ALTER ROLE` / `GRANT ... TO` | role |
-| `CREATE EXTENSION` | extension |
-| `CREATE FOREIGN DATA WRAPPER` | foreign_data_wrapper |
-| `CREATE SERVER` | foreign_server |
-| `CREATE USER MAPPING` | user_mapping |
-| `CREATE PUBLICATION` | publication |
-| `CREATE SUBSCRIPTION` | subscription |
-| `CREATE EVENT TRIGGER` | event_trigger |
-| `CREATE SCHEMA` | schema |
-| `CREATE TYPE` / `CREATE DOMAIN` | type |
-| `CREATE SEQUENCE` | sequence |
-| `CREATE TABLE` (not AS SELECT) | table |
-| `CREATE FOREIGN TABLE` | foreign_table |
-| `CREATE VIEW` | view |
-| `CREATE MATERIALIZED VIEW` | materialized_view |
-| `CREATE FUNCTION ... RETURNS TRIGGER` | trigger_function |
-| `CREATE FUNCTION` (other return types) | function |
-| `CREATE PROCEDURE` | procedure |
-| `CREATE TRIGGER` (BEFORE/AFTER) | trigger (grouped with table) |
-| `CREATE TRIGGER` (INSTEAD OF) | trigger (grouped with view) |
-| `CREATE POLICY` | policy |
-| `CREATE INDEX` | index |
-| `ALTER TABLE ... ADD CONSTRAINT` | constraint |
-| `GRANT` / `REVOKE` on object | grant |
-| `COMMENT ON` | comment |
+| AST Node Type | Statement Type | Notes |
+|---------------|----------------|-------|
+| `CreateRoleStmt`, `AlterRoleStmt`, `GrantRoleStmt` | role | |
+| `CreateExtensionStmt` | extension | |
+| `CreateFdwStmt` | foreign_data_wrapper | |
+| `CreateForeignServerStmt` | foreign_server | |
+| `CreateUserMappingStmt` | user_mapping | |
+| `CreatePublicationStmt` | publication | |
+| `CreateSubscriptionStmt` | subscription | |
+| `CreateEventTrigStmt` | event_trigger | |
+| `CreateSchemaStmt` | schema | |
+| `CreateEnumStmt`, `CreateRangeStmt`, `CompositeTypeStmt`, `CreateDomainStmt` | type | |
+| `CreateSeqStmt` | sequence | |
+| `CreateStmt` | table | Check `relkind` not foreign table |
+| `CreateForeignTableStmt` | foreign_table | |
+| `ViewStmt` | view | |
+| `CreateTableAsStmt` (materialized) | materialized_view | Check `relkind` |
+| `CreateFunctionStmt` | function or trigger_function | Check `RETURNS TRIGGER` in return type |
+| `CreateProcedureStmt` | procedure | |
+| `CreateTrigStmt` | trigger | Check `timing` for INSTEAD OF vs BEFORE/AFTER |
+| `CreatePolicyStmt` | policy | |
+| `IndexStmt` | index | Extract table name from `relation` |
+| `AlterTableStmt` (ADD CONSTRAINT) | constraint | Extract table name |
+| `GrantStmt` | grant | Extract object type and name |
+| `CommentStmt` | comment | Extract object type and name |
 
 ### Phase 2: Statement Grouper
 
@@ -348,13 +390,15 @@ Scans directory structure and produces ordered glob patterns.
 ### Step 1: Statement Classification (2 files)
 
 1. Create `pkg/migration/classify.go`:
-   - Regex-based classifier for all PostgreSQL DDL statements
-   - Extract schema, object name, and parent references
-   - Handle quoted identifiers
+   - Use PostgreSQL parser (multigres or pg_query_go) for AST-based classification
+   - Switch on AST node types to determine statement category
+   - Extract schema, object name, and parent references from AST nodes
+   - Handle all PostgreSQL syntax correctly (quoted identifiers, dollar-quoting, etc.)
 
 2. Create `pkg/migration/classify_test.go`:
    - Test classification of all statement types
-   - Test edge cases (quoted names, special characters)
+   - Test edge cases (quoted names, special characters, complex expressions)
+   - Verify schema/object name extraction from various syntax forms
 
 ### Step 2: Statement Grouping (2 files)
 
@@ -603,9 +647,19 @@ For existing users:
 
 ## Dependencies
 
-- Existing `pkg/parser` for SQL statement splitting
+- **PostgreSQL parser** (`multigres` or `pg_query_go`) for AST-based statement classification
+- Existing `pkg/parser` for SQL statement splitting (still used to split pg_dump output into individual statements)
 - Existing `pkg/migration/dump.go` for pg_dump execution
 - Existing glob pattern system in `pkg/config`
+
+### Parser Options
+
+| Library | Pros | Cons |
+|---------|------|------|
+| `multigres` | Pure Go, no cgo | Newer, less battle-tested |
+| `pg_query_go` | Well-established, used by many tools | Requires cgo (links to libpg_query) |
+
+Recommendation: Evaluate both; prefer pure Go solution if feature-complete for our needs.
 
 ## Success Criteria
 
