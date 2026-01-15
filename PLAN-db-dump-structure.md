@@ -1,5 +1,131 @@
 # Plan: Structured Database Dump for Declarative Schemas
 
+## Implementation Status: ✅ Complete
+
+**Branch:** `claude/plan-db-dump-structure-Msf9h`
+
+### Files Created
+- `pkg/migration/classify.go` - Statement classifier using pg_query_go
+- `pkg/migration/classify_test.go` - Tests for classifier
+- `pkg/migration/group.go` - Statement grouper
+- `pkg/migration/group_test.go` - Tests for grouper
+- `pkg/migration/writer.go` - Directory writer and config generator
+- `pkg/migration/writer_test.go` - Tests for writer
+
+### Files Modified
+- `cmd/db.go` - Added `--structured` and `--output-dir` flags
+- `internal/db/dump/dump.go` - Added `RunStructured()` function
+- `go.mod` - Added `pg_query_go/v5` dependency
+
+---
+
+## Testing Instructions
+
+### Prerequisites
+1. Have a Supabase project with a local database running
+2. Build the CLI from source
+
+### Build from Source
+```bash
+cd /path/to/cli
+go build -o supabase-dev .
+```
+
+### Test Commands
+
+**1. Basic structured dump (from local database):**
+```bash
+cd /path/to/your-supabase-project
+/path/to/supabase-dev db dump --local --structured
+```
+
+This will:
+- Create `supabase/cluster/` directory with cluster-wide objects
+- Create `supabase/schemas/{schema}/` directories with schema-scoped objects
+- Print a summary of files written
+- Print suggested `schema_paths` config for `config.toml`
+
+**2. Dump specific schemas only:**
+```bash
+/path/to/supabase-dev db dump --local --structured --schema public,auth
+```
+
+**3. Dump to custom directory:**
+```bash
+/path/to/supabase-dev db dump --local --structured --output-dir ./my-schemas
+```
+
+**4. Dump from linked remote project:**
+```bash
+/path/to/supabase-dev db dump --linked --structured
+```
+
+### Verification Steps
+
+1. **Check directory structure:**
+   ```bash
+   tree supabase/cluster supabase/schemas
+   ```
+
+2. **Verify file contents:**
+   ```bash
+   cat supabase/schemas/public/tables/your_table.sql
+   ```
+   - Should contain CREATE TABLE + indexes + constraints + policies + triggers
+
+3. **Test round-trip (dump → apply → diff):**
+   ```bash
+   # 1. Dump current schema
+   /path/to/supabase-dev db dump --local --structured
+
+   # 2. Add the suggested schema_paths to config.toml
+
+   # 3. Reset database and apply
+   /path/to/supabase-dev db reset
+
+   # 4. Verify no diff
+   /path/to/supabase-dev db diff --local
+   # Should show no changes
+   ```
+
+### Run Unit Tests
+```bash
+go test ./pkg/migration/... -v
+```
+
+---
+
+## Key Decisions Made
+
+1. **Parser Choice: pg_query_go over multigres**
+   - Used `github.com/pganalyze/pg_query_go/v5` for AST-based SQL parsing
+   - Well-established library used by many PostgreSQL tools
+   - Provides comprehensive AST access for all PostgreSQL statement types
+   - Note: Requires cgo (links to libpg_query)
+
+2. **Single roles.sql file** (not one file per role)
+   - Role grants (`GRANT role TO role`) logically belong with both roles
+   - Keeping all roles in one file makes the hierarchy visible
+
+3. **Policies grouped with tables** (not separate directory)
+   - RLS policies are tightly coupled to their tables
+   - Makes table files self-contained for security review
+
+4. **Triggers grouped with target objects**
+   - BEFORE/AFTER triggers → grouped with their table
+   - INSTEAD OF triggers → grouped with their view
+   - Trigger functions (`RETURNS TRIGGER`) → grouped with the trigger that uses them
+
+5. **No numeric prefixes**
+   - Ordering controlled via `schema_paths` config
+   - Cleaner, more readable filenames
+
+6. **Cluster-wide objects separate from schemas**
+   - Reflects PostgreSQL's actual hierarchy
+   - `cluster/` directory for: roles, extensions, FDWs, publications, subscriptions, event triggers
+
+---
+
 ## Overview
 
 Implement a new mode for the `db dump` command that outputs the database structure into an organized directory hierarchy, enabling declarative schema management. This will allow users to version-control their database schema as individual SQL files that can be composed using the existing `schema_paths` glob pattern system.
