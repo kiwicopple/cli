@@ -90,7 +90,7 @@ func GroupStatements(statements []ClassifiedStatement) map[string]*ObjectFile {
 	}
 
 	// Third pass: add triggers and trigger functions to their parent objects
-	for parentKey, parentTriggers := range triggers {
+	for _, parentTriggers := range triggers {
 		// Sort triggers by timing and name for consistent output
 		sortTriggers(parentTriggers)
 
