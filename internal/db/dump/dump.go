@@ -106,19 +106,34 @@ func RunStructured(ctx context.Context, outputDir string, schemas []string, conf
 	}
 	fmt.Fprintf(os.Stderr, "Dumping structured schema from %s database...\n", db)
 
-	// Get the raw dump
-	var buf strings.Builder
-	if err := migration.DumpSchema(ctx, config, &buf, DockerExec); err != nil {
+	// Get the schema dump (uses pg_dump)
+	var schemaBuf strings.Builder
+	if err := migration.DumpSchema(ctx, config, &schemaBuf, DockerExec); err != nil {
 		return err
 	}
 
-	// Parse and classify statements
-	statements, err := parser.SplitAndTrim(strings.NewReader(buf.String()))
+	// Get the roles dump (uses pg_dumpall --roles-only)
+	var rolesBuf strings.Builder
+	fmt.Fprintf(os.Stderr, "Dumping roles from %s database...\n", db)
+	if err := migration.DumpRole(ctx, config, &rolesBuf, DockerExec); err != nil {
+		return err
+	}
+
+	// Parse and classify schema statements
+	schemaStatements, err := parser.SplitAndTrim(strings.NewReader(schemaBuf.String()))
 	if err != nil {
 		return errors.Errorf("failed to split SQL statements: %w", err)
 	}
 
-	classified := migration.ClassifyStatements(statements)
+	// Parse and classify role statements
+	roleStatements, err := parser.SplitAndTrim(strings.NewReader(rolesBuf.String()))
+	if err != nil {
+		return errors.Errorf("failed to split role statements: %w", err)
+	}
+
+	// Combine all statements
+	allStatements := append(roleStatements, schemaStatements...)
+	classified := migration.ClassifyStatements(allStatements)
 
 	// Group statements
 	objects := migration.GroupStatements(classified)
